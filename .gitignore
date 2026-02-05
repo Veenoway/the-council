@@ -1,0 +1,8 @@
+.env
+# Ignore all files in the node_modules directory
+node_modules/   
+.DS_Store
+.env
+.cursorrules
+.vscode
+package-lock.json
