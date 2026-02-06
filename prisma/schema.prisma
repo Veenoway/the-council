@@ -1,0 +1,75 @@
+// ============================================================
+// PRISMA SCHEMA — Database models
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// MODELS
+// ============================================================
+
+model Message {
+  id          String   @id @default(uuid())
+  botId       String
+  content     String
+  token       String?  // Token address being discussed
+  messageType String   @default("chat") // chat, trade, system
+  createdAt   DateTime @default(now())
+
+  @@index([botId])
+  @@index([token])
+  @@index([createdAt])
+}
+
+model Trade {
+  id           String   @id @default(uuid())
+  botId        String
+  tokenAddress String
+  tokenSymbol  String
+  side         String   // buy, sell
+  amountIn     Float    // Amount spent (MON for buys)
+  amountOut    Float    // Amount received (tokens for buys)
+  price        Float    // Price at execution
+  txHash       String
+  status       String   @default("pending") // pending, confirmed, failed
+  createdAt    DateTime @default(now())
+
+  @@index([botId])
+  @@index([tokenAddress])
+  @@index([createdAt])
+  @@index([status])
+}
+
+model Token {
+  address        String   @id
+  symbol         String
+  name           String
+  price          Float
+  priceChange24h Float    @default(0)
+  mcap           Float
+  liquidity      Float
+  holders        Int
+  deployer       String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([symbol])
+  @@index([createdAt])
+}
+
+model BotWallet {
+  id         String   @id @default(uuid())
+  botId      String   @unique
+  address    String   @unique
+  balance    Float    @default(0)
+  updatedAt  DateTime @updatedAt
+
+  @@index([botId])
+}
