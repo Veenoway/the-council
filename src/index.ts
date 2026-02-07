@@ -7,7 +7,8 @@ import { initWebSocket, closeWebSocket } from './services/websocket.js';
 import { startOrchestrator } from './services/orchestrator.js';
 import { getCurrentToken, getRecentMessages } from './services/messageBus.js';
 import { getTokenPrice } from './services/nadfun.js';
-import { getBotConfig, ALL_BOT_IDS } from './bots/personalities.js';
+import { getBotConfig, ALL_BOT_IDS, type BotId } from './bots/personalities.js';
+import { getBotBalance } from './services/trading.js';
 
 // ============================================================
 // CONFIG
@@ -55,8 +56,6 @@ app.get('/api/current-token', (c) => {
 // POSITIONS ROUTES
 // ============================================================
 
-// GET /api/positions — All positions grouped by bot (for frontend)
-// GET /api/positions — All positions grouped by bot (for frontend)
 app.get('/api/positions', async (c) => {
   try {
     const positions = await prisma.position.findMany({
@@ -64,22 +63,17 @@ app.get('/api/positions', async (c) => {
       orderBy: { createdAt: 'desc' },
     });
 
-    // Get unique token addresses to fetch current prices
     const tokenAddresses = [...new Set(positions.map(p => p.tokenAddress))];
     
-    // Fetch current prices
     const priceMap: Record<string, number> = {};
     for (const address of tokenAddresses) {
       const price = await getTokenPrice(address);
       if (price) priceMap[address] = price;
     }
 
-    // Enrich positions with current price and PnL
     const enrichedPositions = positions.map(p => {
       const currentPrice = priceMap[p.tokenAddress] || 0;
       const amount = Number(p.amount);
-      
-      // USE entryValueMon (what we paid), NOT entryPrice * amount
       const entryValueMON = Number(p.entryValueMon) || 0;
       const currentValueMON = amount * currentPrice;
       const pnlMON = currentValueMON - entryValueMON;
@@ -101,7 +95,6 @@ app.get('/api/positions', async (c) => {
       };
     });
 
-    // Build portfolios per bot
     const portfolios = ALL_BOT_IDS.map(botId => {
       const config = getBotConfig(botId);
       const botPositions = enrichedPositions.filter(p => p.botId === botId);
@@ -135,7 +128,6 @@ app.get('/api/positions', async (c) => {
   }
 });
 
-// GET /api/positions/:botId — Positions for specific bot
 app.get('/api/positions/:botId', async (c) => {
   try {
     const botId = c.req.param('botId');
@@ -146,25 +138,22 @@ app.get('/api/positions/:botId', async (c) => {
       orderBy: { createdAt: 'desc' },
     });
 
-    // Fetch current prices
     const tokenAddresses = [...new Set(positions.map(p => p.tokenAddress))];
     const priceMap: Record<string, number> = {};
     
-    await Promise.all(
-      tokenAddresses.map(async (address) => {
-        const price = await getTokenPrice(address);
-        if (price) priceMap[address] = price;
-      })
-    );
+    for (const address of tokenAddresses) {
+      const price = await getTokenPrice(address);
+      if (price) priceMap[address] = price;
+    }
 
     const enrichedPositions = positions.map(p => {
       const currentPrice = priceMap[p.tokenAddress] || Number(p.entryPrice);
       const entryPrice = Number(p.entryPrice);
       const amount = Number(p.amount);
-      const totalInvested = amount * entryPrice;
+      const entryValueMon = Number(p.entryValueMon) || (amount * entryPrice);
       const currentValue = amount * currentPrice;
-      const pnl = currentValue - totalInvested;
-      const pnlPercent = totalInvested > 0 ? (pnl / totalInvested) * 100 : 0;
+      const pnl = currentValue - entryValueMon;
+      const pnlPercent = entryValueMon > 0 ? (pnl / entryValueMon) * 100 : 0;
 
       return {
         id: p.id,
@@ -173,8 +162,8 @@ app.get('/api/positions/:botId', async (c) => {
         tokenSymbol: p.tokenSymbol,
         amount,
         entryPrice,
+        entryValueMon,
         currentPrice,
-        totalInvested,
         currentValue,
         pnl,
         pnlPercent,
@@ -194,7 +183,7 @@ app.get('/api/positions/:botId', async (c) => {
       summary: {
         openPositions: openPositions.length,
         closedPositions: closedPositions.length,
-        totalInvested: openPositions.reduce((sum, p) => sum + p.totalInvested, 0),
+        totalInvested: openPositions.reduce((sum, p) => sum + p.entryValueMon, 0),
         totalValue: openPositions.reduce((sum, p) => sum + p.currentValue, 0),
         totalPnl: openPositions.reduce((sum, p) => sum + p.pnl, 0),
         realizedPnl: closedPositions.reduce((sum, p) => sum + (p.pnl || 0), 0),
@@ -208,37 +197,127 @@ app.get('/api/positions/:botId', async (c) => {
   }
 });
 
+const tokenCache = new Map<string, { data: any; timestamp: number }>();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+app.get('/api/token/:address', async (c) => {
+  try {
+    const address = c.req.param('address');
+    
+    // Check cache
+    const cached = tokenCache.get(address);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      return c.json(cached.data);
+    }
+    
+    const response = await fetch(`https://api.nad.fun/token/${address}`);
+    
+    if (!response.ok) {
+      return c.json({ error: 'Token not found' }, response?.status);
+    }
+    
+    const data = await response.json();
+    
+    
+    // Cache result
+    tokenCache.set(address, { data, timestamp: Date.now() });
+    
+    return c.json(data);
+  } catch (error) {
+    console.error('Error fetching token:', error);
+    return c.json({ error: 'Failed to fetch token data' }, 500);
+  }
+});
 // ============================================================
-// BOTS ROUTES
+// BOTS ROUTES — Read from Position table (REAL DATA)
 // ============================================================
 
-// GET /api/bots — Leaderboard
+// GET /api/bots — All bots with stats from positions
 app.get('/api/bots', async (c) => {
   try {
-    const stats = await prisma.botStats.findMany({
-      orderBy: { totalPnl: 'desc' },
-    });
-
-    const leaderboard = stats.map((s, index) => {
-      const config = getBotConfig(s.botId as any);
+    const allPositions = await prisma.position.findMany();
+    
+    // Get current prices for open positions
+    const openPositions = allPositions.filter(p => p.isOpen);
+    const tokenAddresses = [...new Set(openPositions.map(p => p.tokenAddress))];
+    const priceMap: Record<string, number> = {};
+    
+    for (const address of tokenAddresses) {
+      try {
+        const price = await getTokenPrice(address);
+        if (price) priceMap[address] = price;
+      } catch (e) {
+        // ignore
+      }
+    }
+    
+    const bots = await Promise.all(ALL_BOT_IDS.map(async (botId) => {
+      const config = getBotConfig(botId);
+      const botPositions = allPositions.filter(p => p.botId === botId);
+      const botOpenPositions = botPositions.filter(p => p.isOpen);
+      const botClosedPositions = botPositions.filter(p => !p.isOpen);
+      
+      // Calculate unrealized PnL from open positions
+      let totalEntryValue = 0;
+      let totalCurrentValue = 0;
+      
+      for (const p of botOpenPositions) {
+        const entryValue = Number(p.entryValueMon) || 0;
+        const currentPrice = priceMap[p.tokenAddress] || Number(p.entryPrice);
+        const currentValue = Number(p.amount) * currentPrice;
+        totalEntryValue += entryValue;
+        totalCurrentValue += currentValue;
+      }
+      
+      const unrealizedPnl = totalCurrentValue - totalEntryValue;
+      const unrealizedPnlPercent = totalEntryValue > 0 ? (unrealizedPnl / totalEntryValue) * 100 : 0;
+      
+      // Calculate realized PnL from closed positions
+      const realizedPnl = botClosedPositions.reduce((sum, p) => sum + (p.pnl ? Number(p.pnl) : 0), 0);
+      const wins = botClosedPositions.filter(p => p.pnl && Number(p.pnl) > 0).length;
+      const losses = botClosedPositions.filter(p => p.pnl && Number(p.pnl) <= 0).length;
+      
+      // Get balance
+      let balance = 0;
+      try {
+        balance = await getBotBalance(botId);
+      } catch (e) {
+        // ignore
+      }
+      
       return {
-        rank: index + 1,
-        botId: s.botId,
-        name: config?.name || s.botId,
+        botId,
+        name: config?.name || botId,
         avatar: config?.avatar || '🤖',
         color: config?.color || '#888',
-        totalTrades: s.totalTrades,
-        wins: s.wins,
-        losses: s.losses,
-        winRate: Number(s.winRate),
-        totalPnl: Number(s.totalPnl),
-        currentStreak: s.currentStreak,
-        bestStreak: s.bestStreak,
+        personality: config?.personality || '',
+        
+        // Stats
+        openPositions: botOpenPositions.length,
+        closedTrades: botClosedPositions.length,
+        totalTrades: botPositions.length,
+        wins,
+        losses,
+        winRate: botClosedPositions.length > 0 ? (wins / botClosedPositions.length) * 100 : 0,
+        
+        // PnL
+        realizedPnl: Math.round(realizedPnl * 1000) / 1000,
+        unrealizedPnl: Math.round(unrealizedPnl * 1000) / 1000,
+        unrealizedPnlPercent: Math.round(unrealizedPnlPercent * 10) / 10,
+        totalPnl: Math.round((realizedPnl + unrealizedPnl) * 1000) / 1000,
+        
+        // Balance
+        balance: Math.round(balance * 1000) / 1000,
+        holdingsValue: Math.round(totalCurrentValue * 1000) / 1000,
+        totalValue: Math.round((balance + totalCurrentValue) * 1000) / 1000,
       };
-    });
+    }));
+
+    // Sort by total value
+    bots.sort((a, b) => b.totalValue - a.totalValue);
 
     return c.json({
-      leaderboard,
+      bots,
       timestamp: new Date().toISOString(),
     });
 
@@ -248,51 +327,138 @@ app.get('/api/bots', async (c) => {
   }
 });
 
-// GET /api/bots/:botId — Bot profile
+// GET /api/bots/:botId — Single bot profile with holdings
 app.get('/api/bots/:botId', async (c) => {
   try {
-    const botId = c.req.param('botId');
-    const config = getBotConfig(botId as any);
+    const botId = c.req.param('botId') as BotId;
+    const config = getBotConfig(botId);
 
-    const [stats, recentTrades, positions] = await Promise.all([
-      prisma.botStats.findUnique({ where: { botId } }),
-      prisma.trade.findMany({
-        where: { botId },
-        orderBy: { createdAt: 'desc' },
-        take: 20,
-      }),
-      prisma.position.findMany({
-        where: { botId, isOpen: true },
-      }),
-    ]);
+    if (!config) {
+      return c.json({ error: 'Bot not found' }, 404);
+    }
+
+    // Get all positions for this bot
+    const allPositions = await prisma.position.findMany({
+      where: { botId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const openPositions = allPositions.filter(p => p.isOpen);
+    const closedPositions = allPositions.filter(p => !p.isOpen);
+
+    // Get current prices
+    const tokenAddresses = [...new Set(openPositions.map(p => p.tokenAddress))];
+    const priceMap: Record<string, number> = {};
+    
+    for (const address of tokenAddresses) {
+      try {
+        const price = await getTokenPrice(address);
+        if (price) priceMap[address] = price;
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Aggregate holdings by token
+    const holdingsMap: Record<string, any> = {};
+    
+    for (const p of openPositions) {
+      const addr = p.tokenAddress;
+      if (!holdingsMap[addr]) {
+        holdingsMap[addr] = {
+          tokenAddress: addr,
+          tokenSymbol: p.tokenSymbol,
+          totalAmount: 0,
+          totalEntryValue: 0,
+          positions: [],
+        };
+      }
+      holdingsMap[addr].totalAmount += Number(p.amount);
+      holdingsMap[addr].totalEntryValue += Number(p.entryValueMon) || 0;
+      holdingsMap[addr].positions.push(p.id);
+    }
+
+    const holdings = Object.values(holdingsMap).map((h: any) => {
+      const currentPrice = priceMap[h.tokenAddress] || 0;
+      const currentValue = h.totalAmount * currentPrice;
+      const unrealizedPnl = currentValue - h.totalEntryValue;
+      const unrealizedPnlPercent = h.totalEntryValue > 0 ? (unrealizedPnl / h.totalEntryValue) * 100 : 0;
+
+      return {
+        tokenAddress: h.tokenAddress,
+        tokenSymbol: h.tokenSymbol,
+        totalAmount: Math.round(h.totalAmount * 100) / 100,
+        totalEntryValue: Math.round(h.totalEntryValue * 1000) / 1000,
+        currentPrice,
+        currentValue: Math.round(currentValue * 1000) / 1000,
+        unrealizedPnl: Math.round(unrealizedPnl * 1000) / 1000,
+        unrealizedPnlPercent: Math.round(unrealizedPnlPercent * 10) / 10,
+        positionCount: h.positions.length,
+      };
+    });
+
+    // Sort by value
+    holdings.sort((a, b) => b.currentValue - a.currentValue);
+
+    // Calculate totals
+    const totalEntryValue = holdings.reduce((sum, h) => sum + h.totalEntryValue, 0);
+    const totalCurrentValue = holdings.reduce((sum, h) => sum + h.currentValue, 0);
+    const totalUnrealizedPnl = totalCurrentValue - totalEntryValue;
+    const totalUnrealizedPnlPercent = totalEntryValue > 0 ? (totalUnrealizedPnl / totalEntryValue) * 100 : 0;
+
+    // Realized PnL
+    const realizedPnl = closedPositions.reduce((sum, p) => sum + (p.pnl ? Number(p.pnl) : 0), 0);
+    const wins = closedPositions.filter(p => p.pnl && Number(p.pnl) > 0).length;
+    const losses = closedPositions.filter(p => p.pnl && Number(p.pnl) <= 0).length;
+    const winRate = closedPositions.length > 0 ? (wins / closedPositions.length) * 100 : 0;
+
+    // Balance
+    let balance = 0;
+    try {
+      balance = await getBotBalance(botId);
+    } catch (e) {
+      // ignore
+    }
+
+    // Recent trades (closed positions)
+    const recentTrades = closedPositions.slice(0, 10).map(t => ({
+      id: t.id,
+      tokenSymbol: t.tokenSymbol,
+      pnl: t.pnl ? Number(t.pnl) : 0,
+      pnlPercent: t.entryValueMon && t.pnl 
+        ? (Number(t.pnl) / Number(t.entryValueMon)) * 100 
+        : 0,
+      closedAt: t.closedAt,
+    }));
 
     return c.json({
-      botId,
-      name: config?.name || botId,
-      avatar: config?.avatar || '🤖',
-      color: config?.color || '#888',
-      personality: config?.personality || '',
-      stats: stats ? {
-        totalTrades: stats.totalTrades,
-        wins: stats.wins,
-        losses: stats.losses,
-        winRate: Number(stats.winRate),
-        totalPnl: Number(stats.totalPnl),
-        currentStreak: stats.currentStreak,
-        bestStreak: stats.bestStreak,
-      } : null,
-      recentTrades: recentTrades.map(t => ({
-        id: t.id,
-        tokenSymbol: t.tokenSymbol,
-        side: t.side,
-        amountIn: Number(t.amountIn),
-        amountOut: Number(t.amountOut),
-        price: Number(t.price),
-        status: t.status,
-        pnl: t.pnl ? Number(t.pnl) : null,
-        createdAt: t.createdAt,
-      })),
-      openPositions: positions.length,
+      bot: {
+        id: botId,
+        name: config.name,
+        avatar: config.avatar,
+        color: config.color,
+        personality: config.personality,
+        walletAddress: config.walletAddress,
+      },
+      stats: {
+        openPositions: openPositions.length,
+        closedTrades: closedPositions.length,
+        totalTrades: allPositions.length,
+        wins,
+        losses,
+        winRate: Math.round(winRate * 10) / 10,
+        realizedPnl: Math.round(realizedPnl * 1000) / 1000,
+        unrealizedPnl: Math.round(totalUnrealizedPnl * 1000) / 1000,
+        unrealizedPnlPercent: Math.round(totalUnrealizedPnlPercent * 10) / 10,
+        totalPnl: Math.round((realizedPnl + totalUnrealizedPnl) * 1000) / 1000,
+      },
+      balance: {
+        mon: Math.round(balance * 1000) / 1000,
+        holdingsValue: Math.round(totalCurrentValue * 1000) / 1000,
+        totalValue: Math.round((balance + totalCurrentValue) * 1000) / 1000,
+      },
+      holdings,
+      recentTrades,
       timestamp: new Date().toISOString(),
     });
 
@@ -303,29 +469,27 @@ app.get('/api/bots/:botId', async (c) => {
 });
 
 // ============================================================
-// STATS ROUTES
+// STATS ROUTES — Read from Position table (REAL DATA)
 // ============================================================
 
-// GET /api/stats — Global stats
 app.get('/api/stats', async (c) => {
   try {
-    const [totalTrades, totalPositions, botStats] = await Promise.all([
-      prisma.trade.count(),
-      prisma.position.count({ where: { isOpen: true } }),
-      prisma.botStats.findMany(),
-    ]);
+    const allPositions = await prisma.position.findMany();
+    const openPositions = allPositions.filter(p => p.isOpen);
+    const closedPositions = allPositions.filter(p => !p.isOpen);
 
-    const totalPnl = botStats.reduce((sum, s) => sum + Number(s.totalPnl), 0);
-    const totalWins = botStats.reduce((sum, s) => sum + s.wins, 0);
-    const totalLosses = botStats.reduce((sum, s) => sum + s.losses, 0);
+    const totalPnl = closedPositions.reduce((sum, p) => sum + (p.pnl ? Number(p.pnl) : 0), 0);
+    const wins = closedPositions.filter(p => p.pnl && Number(p.pnl) > 0).length;
+    const losses = closedPositions.filter(p => p.pnl && Number(p.pnl) <= 0).length;
 
     return c.json({
-      totalTrades,
-      totalPositions,
+      totalTrades: allPositions.length,
+      openPositions: openPositions.length,
+      closedTrades: closedPositions.length,
       totalPnl,
-      totalWins,
-      totalLosses,
-      winRate: totalWins + totalLosses > 0 ? (totalWins / (totalWins + totalLosses)) * 100 : 0,
+      wins,
+      losses,
+      winRate: closedPositions.length > 0 ? (wins / closedPositions.length) * 100 : 0,
       timestamp: new Date().toISOString(),
     });
 
@@ -335,35 +499,50 @@ app.get('/api/stats', async (c) => {
   }
 });
 
-// GET /api/stats/today — Today's stats
 app.get('/api/stats/today', async (c) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
-    const dailyStats = await prisma.botDailyStats.findMany({
-      where: { date: today },
+    // Get positions created today
+    const todayPositions = await prisma.position.findMany({
+      where: {
+        createdAt: { gte: today },
+      },
     });
 
-    const stats = dailyStats.map(s => {
-      const config = getBotConfig(s.botId as any);
-      return {
-        botId: s.botId,
-        name: config?.name || s.botId,
-        trades: s.trades,
-        wins: s.wins,
-        pnl: Number(s.pnl),
-        volume: Number(s.volume),
+    // Group by bot
+    const statsByBot: Record<string, any> = {};
+    
+    for (const botId of ALL_BOT_IDS) {
+      const config = getBotConfig(botId);
+      const botPositions = todayPositions.filter(p => p.botId === botId);
+      const closedToday = botPositions.filter(p => !p.isOpen);
+      
+      const pnl = closedToday.reduce((sum, p) => sum + (p.pnl ? Number(p.pnl) : 0), 0);
+      const volume = botPositions.reduce((sum, p) => sum + (Number(p.entryValueMon) || 0), 0);
+      const wins = closedToday.filter(p => p.pnl && Number(p.pnl) > 0).length;
+
+      statsByBot[botId] = {
+        botId,
+        name: config?.name || botId,
+        trades: botPositions.length,
+        wins,
+        pnl: Math.round(pnl * 1000) / 1000,
+        volume: Math.round(volume * 1000) / 1000,
       };
-    });
+    }
+
+    const stats = Object.values(statsByBot);
 
     return c.json({
-      date: today,
+      date: today.toISOString().split('T')[0],
       stats,
       totals: {
-        trades: stats.reduce((sum, s) => sum + s.trades, 0),
-        wins: stats.reduce((sum, s) => sum + s.wins, 0),
-        pnl: stats.reduce((sum, s) => sum + s.pnl, 0),
-        volume: stats.reduce((sum, s) => sum + s.volume, 0),
+        trades: stats.reduce((sum, s: any) => sum + s.trades, 0),
+        wins: stats.reduce((sum, s: any) => sum + s.wins, 0),
+        pnl: stats.reduce((sum, s: any) => sum + s.pnl, 0),
+        volume: stats.reduce((sum, s: any) => sum + s.volume, 0),
       },
       timestamp: new Date().toISOString(),
     });
@@ -395,7 +574,6 @@ async function main(): Promise<void> {
   ╚═══════════════════════════════════════════════════════════╝
   `);
 
-  // Check required env vars
   const requiredEnvVars = ['XAI_API_KEY'];
   const missing = requiredEnvVars.filter(v => !process.env[v]);
   
@@ -405,11 +583,9 @@ async function main(): Promise<void> {
   }
 
   try {
-    // Initialize database
     console.log('📦 Initializing database...');
     await initDatabase();
 
-    // Start HTTP server
     console.log(`🌐 Starting HTTP server on port ${HTTP_PORT}...`);
     serve({
       fetch: app.fetch,
@@ -417,11 +593,9 @@ async function main(): Promise<void> {
     });
     console.log(`✅ HTTP API running at http://localhost:${HTTP_PORT}`);
 
-    // Initialize WebSocket server
     console.log(`🔌 Starting WebSocket server on port ${WS_PORT}...`);
     initWebSocket(WS_PORT);
 
-    // Start the orchestrator
     console.log('🤖 Starting bot orchestrator...');
     await startOrchestrator();
 
@@ -431,10 +605,6 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 }
-
-// ============================================================
-// GRACEFUL SHUTDOWN
-// ============================================================
 
 async function shutdown(): Promise<void> {
   console.log('\n🛑 Shutting down The Council...');
@@ -452,9 +622,5 @@ process.on('SIGTERM', async () => {
   await shutdown();
   process.exit(0);
 });
-
-// ============================================================
-// RUN
-// ============================================================
 
 main().catch(console.error);

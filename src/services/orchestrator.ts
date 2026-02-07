@@ -1,5 +1,5 @@
 // ============================================================
-// ORCHESTRATOR v8 — Opinions based on REAL TA + fundamentals
+// ORCHESTRATOR v11 — Natural conversation, real prices, no duplicates
 // ============================================================
 
 import type { BotId, Token, Message } from '../types/index.js';
@@ -20,53 +20,59 @@ const grok = new OpenAI({
 });
 
 // ============================================================
-// BOT CONFIGS — What each bot cares about for their opinion
+// BOT CONFIGS
 // ============================================================
 
 const BOTS: Record<BotId, {
   name: string;
   style: string;
-  // What this bot weighs for their opinion
-  weights: {
-    holders: number;      // Community size importance (0-1)
-    ta: number;           // Technical analysis importance (0-1)
-    lp: number;           // Liquidity importance (0-1)
-    momentum: number;     // Volume/momentum importance (0-1)
-  };
-  bullishThreshold: number;  // Score needed to be bullish (0-100)
-  bearishThreshold: number;  // Score below which they're bearish (0-100)
+  expertise: string;
+  uniqueAngles: string[];
+  weights: { holders: number; ta: number; lp: number; momentum: number; };
+  bullishThreshold: number;
+  bearishThreshold: number;
 }> = {
   chad: {
     name: 'James',
-    style: 'casual degen, uses fr/ngl/ser/lfg sparingly, emojis 🔥💀',
+    style: 'casual degen, uses fr/ngl/ser sparingly, emojis 🔥💀, never lists names',
+    expertise: 'momentum and social buzz',
+    uniqueAngles: ['social momentum', 'degen energy', 'fomo potential', 'meme strength'],
     weights: { holders: 0.35, ta: 0.15, lp: 0.10, momentum: 0.40 },
-    bullishThreshold: 50,  // Easy to convince
+    bullishThreshold: 50,
     bearishThreshold: 30,
   },
   quantum: {
     name: 'Keone', 
-    style: 'analytical, cites specific numbers, measured',
+    style: 'analytical, precise with numbers, measured tone, never lists names',
+    expertise: 'technical analysis and chart patterns',
+    uniqueAngles: ['RSI levels', 'MACD signals', 'Bollinger bands', 'chart patterns', 'MA structure'],
     weights: { holders: 0.20, ta: 0.45, lp: 0.15, momentum: 0.20 },
     bullishThreshold: 55,
     bearishThreshold: 40,
   },
   sensei: {
     name: 'Portdev',
-    style: 'chill, occasional Japanese (sugoi, yabai), anime refs',
+    style: 'chill anime vibes, occasional Japanese, wise, never lists names',
+    expertise: 'community dynamics and holder behavior',
+    uniqueAngles: ['holder conviction', 'diamond hands', 'community loyalty', 'organic growth'],
     weights: { holders: 0.45, ta: 0.15, lp: 0.10, momentum: 0.30 },
     bullishThreshold: 50,
     bearishThreshold: 30,
   },
   sterling: {
     name: 'Harpal',
-    style: 'formal, dry humor, risk-focused',
+    style: 'formal risk analyst, dry humor, measured, never lists names',
+    expertise: 'risk assessment and liquidity',
+    uniqueAngles: ['LP depth', 'slippage risk', 'exit liquidity', 'position sizing'],
     weights: { holders: 0.25, ta: 0.25, lp: 0.35, momentum: 0.15 },
-    bullishThreshold: 60,  // Harder to convince
+    bullishThreshold: 60,
     bearishThreshold: 45,
   },
   oracle: {
     name: 'Mike',
-    style: 'cryptic, short, mysterious, 👁️',
+    style: 'cryptic oracle, short mysterious statements, 👁️, never lists names',
+    expertise: 'whale movements and hidden signals',
+    uniqueAngles: ['whale wallets', 'smart money', 'accumulation', 'hidden patterns'],
     weights: { holders: 0.30, ta: 0.30, lp: 0.15, momentum: 0.25 },
     bullishThreshold: 55,
     bearishThreshold: 40,
@@ -82,14 +88,16 @@ let isAnalyzing = false;
 let lastTokenScan = 0;
 const TOKEN_SCAN_INTERVAL = 120_000;
 const seenTokens = new Set<string>();
-const recentMessages = new Set<string>();
+
+// Anti-duplicate: track exact messages sent this session
+const sentMessages = new Set<string>();
 
 // ============================================================
 // MAIN LOOP
 // ============================================================
 
 export async function startOrchestrator(): Promise<void> {
-  console.log('🏛️ The Council v8 - TA-based opinions');
+  console.log('🏛️ The Council v11 - Natural conversation');
 
   onInternalEvent('human_message', async (data) => {
     await handleHumanMessage(data);
@@ -129,240 +137,322 @@ async function scanForNewTokens(): Promise<void> {
 }
 
 // ============================================================
-// SCORE CALCULATIONS — Real TA-based scoring
+// PRICE FORMATTING — Use real prices
+// ============================================================
+
+function formatPrice(price: number): string {
+  if (price >= 1) return `$${price.toFixed(2)}`;
+  if (price >= 0.01) return `$${price.toFixed(4)}`;
+  if (price >= 0.0001) return `$${price.toFixed(6)}`;
+  return `$${price.toFixed(8)}`;
+}
+
+function formatMcap(mcap: number): string {
+  if (mcap >= 1_000_000) return `${(mcap / 1_000_000).toFixed(1)}M`;
+  return `${(mcap / 1000).toFixed(0)}K`;
+}
+
+// ============================================================
+// TA SUMMARY BUILDER — With real prices
+// ============================================================
+
+interface TASummary {
+  keyIndicators: string[];
+  patterns: string[];
+  signals: string[];
+  verdict: string;
+  score: number;
+  forKeone: string[];
+  forJames: string[];
+  forPortdev: string[];
+  forHarpal: string[];
+  forMike: string[];
+}
+
+function buildTASummary(ta: TechnicalIndicators | null, token: Token, riskFlags: string[]): TASummary {
+  const forKeone: string[] = [];
+  const forJames: string[] = [];
+  const forPortdev: string[] = [];
+  const forHarpal: string[] = [];
+  const forMike: string[] = [];
+  
+  const keyIndicators: string[] = [];
+  const patterns: string[] = [];
+  const signals: string[] = [];
+  let score = 50;
+
+  const price = formatPrice(token.price);
+  const mcap = formatMcap(token.mcap);
+
+  if (!ta) {
+    return {
+      keyIndicators: ['Limited data'],
+      patterns: [],
+      signals: [],
+      verdict: 'insufficient data',
+      score: 50,
+      forKeone: ['Not enough candle data yet'],
+      forJames: ['Volume building'],
+      forPortdev: [`${token.holders.toLocaleString()} holders in`],
+      forHarpal: ['Need more data for full risk assessment'],
+      forMike: ['The data keeps its secrets for now'],
+    };
+  }
+
+  // ============ RSI ============
+  if (ta.rsi !== undefined) {
+    const rsi = ta.rsi.toFixed(0);
+    if (ta.rsi <= 30) {
+      forKeone.push(`RSI at ${rsi} - oversold, bounce setup`);
+      score += 15;
+    } else if (ta.rsi <= 40) {
+      forKeone.push(`RSI ${rsi} approaching oversold`);
+      score += 8;
+    } else if (ta.rsi >= 80) {
+      forKeone.push(`RSI ${rsi} way overbought - careful here`);
+      score -= 15;
+    } else if (ta.rsi >= 70) {
+      forKeone.push(`RSI ${rsi} getting hot`);
+      score -= 5;
+    } else if (ta.rsi >= 55) {
+      forKeone.push(`RSI ${rsi} showing healthy momentum`);
+      score += 8;
+    } else {
+      forKeone.push(`RSI ${rsi} neutral zone`);
+    }
+    keyIndicators.push(`RSI ${rsi}`);
+  }
+
+  // ============ MACD ============
+  if (ta.macdCrossover === 'bullish') {
+    forKeone.push('MACD just crossed bullish');
+    signals.push('MACD buy signal');
+    score += 15;
+  } else if (ta.macdCrossover === 'bearish') {
+    forKeone.push('MACD crossed bearish');
+    score -= 12;
+  }
+  
+  if (ta.macdHistogram !== undefined && ta.macdHistogram > 0) {
+    forKeone.push('MACD histogram expanding positive');
+    score += 5;
+  }
+
+  // ============ BOLLINGER BANDS ============
+  if (ta.bbSqueeze) {
+    forKeone.push('BB squeeze forming - big move coming');
+    forMike.push('The bands tighten... coiling for release');
+    patterns.push('BB squeeze');
+    score += 12;
+  }
+  
+  if (ta.bbPosition === 'below_lower') {
+    forKeone.push('Below lower BB - oversold');
+    score += 8;
+  } else if (ta.bbPosition === 'above_upper') {
+    forKeone.push('Riding upper BB - extended');
+    score -= 5;
+  }
+
+  // ============ MOVING AVERAGES ============
+  if (ta.maCrossover === 'golden_cross') {
+    forKeone.push('Golden cross confirmed');
+    patterns.push('Golden cross');
+    score += 15;
+  } else if (ta.maCrossover === 'death_cross') {
+    forKeone.push('Death cross forming');
+    patterns.push('Death cross');
+    score -= 15;
+  }
+  
+  if (ta.priceVsMa === 'above_all') {
+    forKeone.push('Price above all major MAs');
+    score += 10;
+  } else if (ta.priceVsMa === 'below_all') {
+    forKeone.push('Below all MAs - downtrend');
+    score -= 10;
+  }
+
+  // ============ CHART PATTERNS ============
+  if (ta.patterns && ta.patterns.length > 0) {
+    for (const p of ta.patterns) {
+      const name = p.name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      if (p.direction === 'bullish') {
+        forKeone.push(`${name} pattern (${p.confidence}% confidence)`);
+        patterns.push(name);
+        score += Math.floor(p.confidence / 8);
+      } else if (p.direction === 'bearish') {
+        forKeone.push(`${name} - bearish pattern`);
+        patterns.push(name);
+        score -= Math.floor(p.confidence / 8);
+      }
+    }
+  }
+
+  // ============ TREND ============
+  if (ta.trend === 'strong_uptrend') {
+    forKeone.push('Strong uptrend - higher highs, higher lows');
+    score += 12;
+  } else if (ta.trend === 'uptrend') {
+    forKeone.push('Uptrend intact');
+    score += 8;
+  } else if (ta.trend === 'sideways') {
+    forKeone.push('Consolidating sideways');
+  } else if (ta.trend === 'downtrend') {
+    forKeone.push('Downtrend active');
+    score -= 10;
+  }
+
+  // ============ SUPPORT/RESISTANCE - Use real price ============
+  if (ta.nearSupport && ta.supportLevel) {
+    forKeone.push(`Testing support at ${formatPrice(ta.supportLevel)}`);
+    score += 5;
+  } else if (ta.nearSupport) {
+    forKeone.push('Near key support level');
+    score += 5;
+  }
+  
+  if (ta.nearResistance && ta.resistanceLevel) {
+    forKeone.push(`Resistance at ${formatPrice(ta.resistanceLevel)}`);
+    score -= 5;
+  }
+
+  // ============ VOLUME ============
+  if (ta.volumeSpike) {
+    forJames.push(`Volume spiking ${ta.volumeRatio?.toFixed(1)}x`);
+    forMike.push('Volume speaks... someone knows');
+    score += 10;
+  } else if (ta.volumeRatio && ta.volumeRatio > 1.5) {
+    forJames.push(`Volume up ${ta.volumeRatio.toFixed(1)}x`);
+    score += 5;
+  }
+
+  // ============ OBV ============
+  if (ta.obvTrend === 'accumulation') {
+    forMike.push('OBV showing accumulation');
+    signals.push('Accumulation');
+    score += 8;
+  } else if (ta.obvTrend === 'distribution') {
+    forMike.push('OBV diverging - distribution');
+    forHarpal.push('OBV shows distribution');
+    score -= 10;
+  }
+
+  // ============ WHALE ACTIVITY ============
+  if (ta.whaleActivity === 'buying') {
+    forMike.push('Whale wallets accumulating');
+    score += 12;
+  } else if (ta.whaleActivity === 'selling') {
+    forMike.push('Whale distribution detected');
+    forHarpal.push('Large holders reducing');
+    score -= 15;
+  }
+
+  // ============ HOLDERS (for Portdev) ============
+  const h = token.holders;
+  if (h >= 20000) {
+    forPortdev.push(`${h.toLocaleString()} holders - that's massive for Monad`);
+  } else if (h >= 10000) {
+    forPortdev.push(`${h.toLocaleString()} believers - serious community`);
+  } else if (h >= 5000) {
+    forPortdev.push(`${h.toLocaleString()} holders showing conviction`);
+  } else if (h >= 1000) {
+    forPortdev.push(`${h.toLocaleString()} holders building`);
+  }
+
+  // ============ RISK (for Harpal) ============
+  const lpRatio = token.liquidity / (token.mcap || 1);
+  if (lpRatio < 0.05) {
+    forHarpal.push(`LP at ${(lpRatio * 100).toFixed(1)}% is thin - watch slippage`);
+  } else if (lpRatio < 0.08) {
+    forHarpal.push(`${(lpRatio * 100).toFixed(1)}% LP - size accordingly`);
+  } else if (lpRatio >= 0.15) {
+    forHarpal.push(`${(lpRatio * 100).toFixed(1)}% LP is healthy`);
+  } else {
+    forHarpal.push(`LP ratio at ${(lpRatio * 100).toFixed(1)}%`);
+  }
+  
+  if (riskFlags.length > 0) {
+    forHarpal.push(`Flags: ${riskFlags.slice(0, 2).join(', ')}`);
+  }
+
+  // Clamp
+  score = Math.max(0, Math.min(100, score));
+
+  let verdict: string;
+  if (score >= 75) verdict = 'strong bullish';
+  else if (score >= 60) verdict = 'bullish';
+  else if (score >= 45) verdict = 'neutral';
+  else if (score >= 30) verdict = 'bearish';
+  else verdict = 'strong bearish';
+
+  return { keyIndicators, patterns, signals, verdict, score, forKeone, forJames, forPortdev, forHarpal, forMike };
+}
+
+// ============================================================
+// SCORES
 // ============================================================
 
 interface TokenScores {
-  // Individual scores (0-100)
   holdersScore: number;
   taScore: number;
   lpScore: number;
   momentumScore: number;
-  
-  // Derived
   overall: number;
-  
-  // Human readable
   holderVerdict: string;
-  taVerdict: string;
   lpVerdict: string;
-  momentumVerdict: string;
-  
-  // Raw data for prompts
-  data: {
-    holders: number;
-    holdersFormatted: string;
-    mcapK: string;
-    lpRatio: string;
-    rsi: string;
-    rsiSignal: string;
-    macd: string;
-    trend: string;
-    bbPosition: string;
-    bbSqueeze: boolean;
-    volumeRatio: string;
-    volumeSpike: boolean;
-    whales: string;
-    obv: string;
-    patterns: string;
-    signal: string;
-    support: boolean;
-    resistance: boolean;
-    bullishFactors: string[];
-    bearishFactors: string[];
-  };
+  taSummary: TASummary;
 }
 
-function calculateScores(token: Token, ta: TechnicalIndicators | null, riskScore: number): TokenScores {
-  // ============ HOLDER SCORE (for Monad) ============
-  let holdersScore = 0;
-  let holderVerdict = '';
+function calculateScores(token: Token, ta: TechnicalIndicators | null, riskScore: number, riskFlags: string[]): TokenScores {
+  const taSummary = buildTASummary(ta, token, riskFlags);
   
-  if (token.holders >= 30000) { holdersScore = 98; holderVerdict = 'exceptional - top tier on Monad'; }
-  else if (token.holders >= 20000) { holdersScore = 95; holderVerdict = 'massive community'; }
-  else if (token.holders >= 10000) { holdersScore = 90; holderVerdict = 'huge for Monad'; }
-  else if (token.holders >= 5000) { holdersScore = 80; holderVerdict = 'very strong community'; }
-  else if (token.holders >= 2000) { holdersScore = 70; holderVerdict = 'solid holder base'; }
-  else if (token.holders >= 1000) { holdersScore = 60; holderVerdict = 'decent community'; }
-  else if (token.holders >= 500) { holdersScore = 50; holderVerdict = 'building momentum'; }
-  else if (token.holders >= 200) { holdersScore = 40; holderVerdict = 'early stage'; }
-  else { holdersScore = 25; holderVerdict = 'very early'; }
+  let holdersScore = 0, holderVerdict = '';
+  if (token.holders >= 30000) { holdersScore = 98; holderVerdict = 'exceptional'; }
+  else if (token.holders >= 20000) { holdersScore = 95; holderVerdict = 'massive'; }
+  else if (token.holders >= 10000) { holdersScore = 90; holderVerdict = 'huge'; }
+  else if (token.holders >= 5000) { holdersScore = 80; holderVerdict = 'very strong'; }
+  else if (token.holders >= 2000) { holdersScore = 70; holderVerdict = 'solid'; }
+  else if (token.holders >= 1000) { holdersScore = 60; holderVerdict = 'decent'; }
+  else { holdersScore = 45; holderVerdict = 'early'; }
 
-  // ============ TA SCORE ============
-  let taScore = 50; // Default neutral
-  let taVerdict = 'neutral signals';
-  
-  if (ta) {
-    let taPoints = 50; // Start neutral
-    
-    // RSI contribution (-15 to +15)
-    if (ta.rsi <= 30) taPoints += 15;  // Oversold = bullish
-    else if (ta.rsi <= 40) taPoints += 10;
-    else if (ta.rsi <= 60) taPoints += 5;  // Neutral-ish is fine
-    else if (ta.rsi <= 70) taPoints += 0;  // Getting warm
-    else if (ta.rsi <= 80) taPoints -= 5;  // Overbought warning
-    else taPoints -= 15;  // Very overbought
-    
-    // MACD contribution (-10 to +15)
-    if (ta.macdCrossover === 'bullish') taPoints += 15;
-    else if (ta.macdCrossover === 'bearish') taPoints -= 10;
-    if (ta.macdHistogram > 0) taPoints += 5;
-    else if (ta.macdHistogram < 0) taPoints -= 5;
-    
-    // Moving averages (-10 to +10)
-    if (ta.priceVsMa === 'above_all') taPoints += 10;
-    else if (ta.priceVsMa === 'below_all') taPoints -= 10;
-    if (ta.maCrossover === 'golden_cross') taPoints += 10;
-    else if (ta.maCrossover === 'death_cross') taPoints -= 10;
-    
-    // Bollinger Bands (-5 to +10)
-    if (ta.bbSqueeze) taPoints += 10;  // Squeeze = potential breakout
-    if (ta.bbPosition === 'below_lower') taPoints += 5;  // Oversold
-    else if (ta.bbPosition === 'above_upper') taPoints -= 5;  // Overbought
-    
-    // Trend (-10 to +15)
-    if (ta.trend === 'strong_uptrend') taPoints += 15;
-    else if (ta.trend === 'uptrend') taPoints += 10;
-    else if (ta.trend === 'sideways') taPoints += 0;
-    else if (ta.trend === 'downtrend') taPoints -= 10;
-    else if (ta.trend === 'strong_downtrend') taPoints -= 15;
-    
-    // Support/Resistance
-    if (ta.nearSupport) taPoints += 5;  // Good entry
-    if (ta.nearResistance) taPoints -= 5;  // Potential rejection
-    
-    // Patterns
-    for (const p of ta.patterns) {
-      if (p.direction === 'bullish') taPoints += (p.confidence / 10);
-      else if (p.direction === 'bearish') taPoints -= (p.confidence / 10);
-    }
-    
-    // Overall signal boost
-    if (ta.signal === 'strong_buy') taPoints += 10;
-    else if (ta.signal === 'buy') taPoints += 5;
-    else if (ta.signal === 'sell') taPoints -= 5;
-    else if (ta.signal === 'strong_sell') taPoints -= 10;
-    
-    taScore = Math.max(0, Math.min(100, taPoints));
-    
-    // Verdict
-    if (taScore >= 75) taVerdict = 'strong bullish signals';
-    else if (taScore >= 60) taVerdict = 'bullish leaning';
-    else if (taScore >= 45) taVerdict = 'neutral/mixed signals';
-    else if (taScore >= 30) taVerdict = 'bearish leaning';
-    else taVerdict = 'strong bearish signals';
-  }
+  const taScore = taSummary.score;
 
-  // ============ LP SCORE ============
   const lpRatio = token.liquidity / (token.mcap || 1);
-  let lpScore = 0;
-  let lpVerdict = '';
-  
-  if (lpRatio >= 0.20) { lpScore = 90; lpVerdict = 'excellent liquidity'; }
-  else if (lpRatio >= 0.15) { lpScore = 80; lpVerdict = 'very healthy LP'; }
-  else if (lpRatio >= 0.10) { lpScore = 70; lpVerdict = 'good liquidity'; }
-  else if (lpRatio >= 0.08) { lpScore = 60; lpVerdict = 'decent LP'; }
-  else if (lpRatio >= 0.06) { lpScore = 50; lpVerdict = 'acceptable for meme'; }
-  else if (lpRatio >= 0.04) { lpScore = 35; lpVerdict = 'thin liquidity'; }
-  else { lpScore = 20; lpVerdict = 'low LP - careful with size'; }
+  let lpScore = 0, lpVerdict = '';
+  if (lpRatio >= 0.15) { lpScore = 85; lpVerdict = 'healthy'; }
+  else if (lpRatio >= 0.10) { lpScore = 70; lpVerdict = 'decent'; }
+  else if (lpRatio >= 0.07) { lpScore = 55; lpVerdict = 'acceptable'; }
+  else if (lpRatio >= 0.05) { lpScore = 40; lpVerdict = 'thin'; }
+  else { lpScore = 25; lpVerdict = 'low'; }
 
-  // ============ MOMENTUM SCORE ============
   let momentumScore = 50;
-  let momentumVerdict = 'average activity';
-  
   if (ta) {
-    let momPoints = 50;
-    
-    // Volume
-    if (ta.volumeSpike) momPoints += 20;
-    else if (ta.volumeRatio > 1.5) momPoints += 10;
-    else if (ta.volumeRatio < 0.5) momPoints -= 10;
-    
-    // Volume trend
-    if (ta.volumeTrend === 'increasing') momPoints += 10;
-    else if (ta.volumeTrend === 'decreasing') momPoints -= 10;
-    
-    // Buy/sell pressure
-    if (ta.buySellRatio > 2) momPoints += 15;
-    else if (ta.buySellRatio > 1.5) momPoints += 10;
-    else if (ta.buySellRatio > 1.2) momPoints += 5;
-    else if (ta.buySellRatio < 0.5) momPoints -= 15;
-    else if (ta.buySellRatio < 0.8) momPoints -= 10;
-    
-    // OBV trend
-    if (ta.obvTrend === 'accumulation') momPoints += 10;
-    else if (ta.obvTrend === 'distribution') momPoints -= 10;
-    
-    // Whale activity
-    if (ta.whaleActivity === 'buying') momPoints += 10;
-    else if (ta.whaleActivity === 'selling') momPoints -= 15;
-    
-    momentumScore = Math.max(0, Math.min(100, momPoints));
-    
-    if (momentumScore >= 75) momentumVerdict = 'strong buying momentum';
-    else if (momentumScore >= 60) momentumVerdict = 'positive momentum';
-    else if (momentumScore >= 45) momentumVerdict = 'neutral momentum';
-    else if (momentumScore >= 30) momentumVerdict = 'weak momentum';
-    else momentumVerdict = 'negative momentum';
+    let m = 50;
+    if (ta.volumeSpike) m += 20;
+    else if (ta.volumeRatio && ta.volumeRatio > 1.5) m += 10;
+    if (ta.obvTrend === 'accumulation') m += 10;
+    else if (ta.obvTrend === 'distribution') m -= 10;
+    if (ta.whaleActivity === 'buying') m += 10;
+    else if (ta.whaleActivity === 'selling') m -= 15;
+    momentumScore = Math.max(0, Math.min(100, m));
   }
 
-  // ============ OVERALL (simple average for display) ============
   const overall = (holdersScore + taScore + lpScore + momentumScore) / 4;
 
-  // ============ BUILD DATA OBJECT ============
-  const data = {
-    holders: token.holders,
-    holdersFormatted: token.holders.toLocaleString(),
-    mcapK: (token.mcap / 1000).toFixed(0),
-    lpRatio: (lpRatio * 100).toFixed(1),
-    rsi: ta?.rsi?.toFixed(0) || 'N/A',
-    rsiSignal: ta?.rsiSignal || 'unknown',
-    macd: ta?.macdCrossover || 'none',
-    trend: ta?.trend?.replace(/_/g, ' ') || 'unknown',
-    bbPosition: ta?.bbPosition?.replace(/_/g, ' ') || 'middle',
-    bbSqueeze: ta?.bbSqueeze || false,
-    volumeRatio: ta?.volumeRatio?.toFixed(1) || '1.0',
-    volumeSpike: ta?.volumeSpike || false,
-    whales: ta?.whaleActivity || 'none',
-    obv: ta?.obvTrend || 'neutral',
-    patterns: ta?.patterns?.map(p => p.name).join(', ') || 'none',
-    signal: ta?.signal?.replace(/_/g, ' ') || 'hold',
-    support: ta?.nearSupport || false,
-    resistance: ta?.nearResistance || false,
-    bullishFactors: ta?.bullishFactors || [],
-    bearishFactors: ta?.bearishFactors || [],
-  };
-
-  return {
-    holdersScore,
-    taScore,
-    lpScore,
-    momentumScore,
-    overall,
-    holderVerdict,
-    taVerdict,
-    lpVerdict,
-    momentumVerdict,
-    data,
-  };
+  return { holdersScore, taScore, lpScore, momentumScore, overall, holderVerdict, lpVerdict, taSummary };
 }
-
-// ============================================================
-// BOT OPINION CALCULATOR — Based on their weights
-// ============================================================
 
 function calculateBotOpinion(botId: BotId, scores: TokenScores): 'bullish' | 'bearish' | 'neutral' {
   const bot = BOTS[botId];
-  
-  // Calculate weighted score for this bot
-  const weightedScore = 
+  const w = 
     (scores.holdersScore * bot.weights.holders) +
     (scores.taScore * bot.weights.ta) +
     (scores.lpScore * bot.weights.lp) +
     (scores.momentumScore * bot.weights.momentum);
   
-  if (weightedScore >= bot.bullishThreshold) return 'bullish';
-  if (weightedScore < bot.bearishThreshold) return 'bearish';
+  if (w >= bot.bullishThreshold) return 'bullish';
+  if (w < bot.bearishThreshold) return 'bearish';
   return 'neutral';
 }
 
@@ -375,22 +465,21 @@ async function analyzeToken(token: Token): Promise<void> {
   isAnalyzing = true;
   currentToken = token;
   setCurrentTokenInBus(token);
-  recentMessages.clear();
+  sentMessages.clear();
 
   const chat: string[] = [];
 
   try {
     broadcastNewToken(token);
 
-    await sleep(500);
+    await sleep(1500);
     const ta = await analyzeTechnicals(token.address);
-    await sleep(1000);
+    await sleep(2000);
     const { score: riskScore, flags } = await calculateRiskScore(token);
     
-    // Calculate all scores
-    const scores = calculateScores(token, ta, riskScore);
+    const scores = calculateScores(token, ta, riskScore, flags);
+    const summary = scores.taSummary;
     
-    // Pre-calculate opinions based on data (can be influenced by debate)
     const opinions: Record<BotId, 'bullish' | 'bearish' | 'neutral'> = {
       chad: calculateBotOpinion('chad', scores),
       quantum: calculateBotOpinion('quantum', scores),
@@ -399,118 +488,123 @@ async function analyzeToken(token: Token): Promise<void> {
       oracle: calculateBotOpinion('oracle', scores),
     };
 
-    const d = scores.data;
+    // Real token data
+    const sym = token.symbol;
+    const price = formatPrice(token.price);
+    const mcap = formatMcap(token.mcap);
+    const holders = token.holders.toLocaleString();
+    const lpPct = ((token.liquidity / token.mcap) * 100).toFixed(1);
 
     // =========================================================
     // PHASE 1: James alerts
     // =========================================================
 
-    const jamesOpinion = opinions.chad;
     const msg1 = await generate('chad', `
-Alert: $${token.symbol} on Monad
+Alert: $${sym} on Monad
 
-Stats:
-- ${d.holdersFormatted} holders (${scores.holderVerdict})
-- ${d.mcapK}K mcap
-- ${d.lpRatio}% LP
-${d.volumeSpike ? '- Volume spiking ' + d.volumeRatio + 'x!' : ''}
-${d.macd === 'bullish' ? '- MACD bullish cross' : ''}
+REAL DATA (use these exact numbers):
+- Price: ${price}
+- Mcap: ${mcap}
+- Holders: ${holders}
+- Your vibe: ${opinions.chad}
 
-Your analysis says: ${jamesOpinion}
-${jamesOpinion === 'bullish' ? 'You like this setup.' : jamesOpinion === 'bearish' ? 'You have concerns.' : 'You want more info.'}
-
-Alert the group with your take. 12-18 words. Be natural.
+Alert the group naturally. Pick 1-2 stats that excite you.
+DON'T list everyone's names. 12-20 words max.
     `, chat);
     
     await say('chad', msg1);
     chat.push(`James: ${msg1}`);
-    await sleep(3500);
+    await sleep(4000);
 
     // =========================================================
-    // PHASE 2: Keone with TA focus
+    // PHASE 2: Keone TA
     // =========================================================
 
-    const keoneOpinion = opinions.quantum;
+    const keonePoints = summary.forKeone.slice(0, 3);
     const msg2 = await generate('quantum', `
-James alerted about $${token.symbol}.
+$${sym} - giving my TA.
 
-Your TA analysis:
-- RSI: ${d.rsi} (${d.rsiSignal})
-- MACD: ${d.macd}
-- Trend: ${d.trend}
-- MAs: price ${ta?.priceVsMa?.replace(/_/g, ' ') || 'mixed'}
-- TA Score: ${scores.taScore}/100 (${scores.taVerdict})
+REAL DATA:
+- Price: ${price}
+- Mcap: ${mcap}
 
-Your calculated opinion: ${keoneOpinion}
+MY TA FINDINGS (pick 2-3):
+${keonePoints.map(p => '• ' + p).join('\n')}
+${summary.patterns.length > 0 ? '• Patterns: ' + summary.patterns.join(', ') : ''}
 
-James said: "${msg1}"
-
-Respond to James with your TA perspective. Reference specific indicators.
-You're ${keoneOpinion} based on the data. 15-22 words.
+I'm ${opinions.quantum}. Give technical analysis.
+Use REAL price ${price} if mentioning levels.
+DON'T start with names. 18-28 words.
     `, chat);
     
     await say('quantum', msg2);
     chat.push(`Keone: ${msg2}`);
-    await sleep(3500);
+    await sleep(4500);
 
     // =========================================================
-    // PHASE 3: Portdev on community
+    // PHASE 3: James follow-up
     // =========================================================
 
-    const portdevOpinion = opinions.sensei;
-    const msg3 = await generate('sensei', `
-$${token.symbol} discussion.
+    const msg3 = await generate('chad', `
+Keone gave TA on $${sym}.
 
-Community data:
-- ${d.holdersFormatted} holders (${scores.holderVerdict})
-- Holder score: ${scores.holdersScore}/100
-- Momentum: ${scores.momentumVerdict}
-${d.volumeSpike ? '- Volume is pumping!' : ''}
+React naturally or ask a quick question. 
+DON'T just say "Keone," - be natural. 8-14 words.
 
-Your calculated opinion: ${portdevOpinion}
-
-Chat:
-${chat.join('\n')}
-
-Add your community/momentum perspective. Respond to what was said.
-You're ${portdevOpinion}. 15-22 words.
+Keone said: "${msg2}"
     `, chat);
     
-    await say('sensei', msg3);
-    chat.push(`Portdev: ${msg3}`);
-    await sleep(3500);
+    await say('chad', msg3);
+    chat.push(`James: ${msg3}`);
+    await sleep(3000);
 
     // =========================================================
-    // PHASE 4: Harpal on risk
+    // PHASE 4: Portdev community
     // =========================================================
 
-    const harpalOpinion = opinions.sterling;
-    const msg4 = await generate('sterling', `
-$${token.symbol} risk assessment.
+    const portdevPoints = summary.forPortdev.slice(0, 2);
+    const msg4 = await generate('sensei', `
+$${sym} discussion.
 
-Risk metrics:
-- LP: ${d.lpRatio}% (${scores.lpVerdict})
-- LP Score: ${scores.lpScore}/100
-- Whale activity: ${d.whales}
-- Risk flags: ${flags.length > 0 ? flags.join(', ') : 'none major'}
+MY COMMUNITY INSIGHTS:
+${portdevPoints.map(p => '• ' + p).join('\n')}
 
-Positive factors: ${d.holdersFormatted} holders is ${scores.holderVerdict}
+I'm ${opinions.sensei}. Add community perspective.
+DON'T start by listing names. Be natural. 14-22 words.
 
-Your calculated opinion: ${harpalOpinion}
-${harpalOpinion === 'bullish' ? 'Risk/reward looks acceptable to you.' : harpalOpinion === 'bearish' ? 'You have concerns about risk.' : 'You see both sides.'}
-
-Chat:
-${chat.join('\n')}
-
-Give your risk take. Respond to the others. 18-25 words.
+Recent chat:
+${chat.slice(-2).join('\n')}
     `, chat);
     
-    await say('sterling', msg4);
-    chat.push(`Harpal: ${msg4}`);
-    await sleep(3500);
+    await say('sensei', msg4);
+    chat.push(`Portdev: ${msg4}`);
+    await sleep(4000);
 
     // =========================================================
-    // PHASE 5: Debate if disagreement
+    // PHASE 5: Harpal risk
+    // =========================================================
+
+    const harpalPoints = summary.forHarpal.slice(0, 2);
+    const msg5 = await generate('sterling', `
+$${sym} risk check.
+
+MY RISK FINDINGS:
+${harpalPoints.map(p => '• ' + p).join('\n')}
+
+I'm ${opinions.sterling}. Give risk perspective.
+DON'T start with "James, Keone, Portdev" - just talk naturally.
+If setup looks ok, say so. 16-24 words.
+
+Recent:
+${chat.slice(-2).join('\n')}
+    `, chat);
+    
+    await say('sterling', msg5);
+    chat.push(`Harpal: ${msg5}`);
+    await sleep(4000);
+
+    // =========================================================
+    // PHASE 6: Debate if needed
     // =========================================================
 
     const bulls = ALL_BOT_IDS.filter(b => opinions[b] === 'bullish');
@@ -520,138 +614,105 @@ Give your risk take. Respond to the others. 18-25 words.
       const bull = bulls[0];
       const bear = bears[0];
 
-      // Bull argues
       const bullArg = await generate(bull, `
-You're bullish on $${token.symbol}. ${BOTS[bear].name} seems cautious.
+You're bullish on $${sym}. ${BOTS[bear].name} seems cautious.
 
-Your strongest points:
-${scores.holdersScore >= 70 ? '- ' + d.holdersFormatted + ' holders is strong for Monad' : ''}
-${scores.taScore >= 55 ? '- TA shows ' + scores.taVerdict : ''}
-${scores.momentumScore >= 60 ? '- ' + scores.momentumVerdict : ''}
+Push back with ONE good point. Don't list names. 10-18 words.
 
-Chat:
-${chat.slice(-3).join('\n')}
-
-Make your case to ${BOTS[bear].name}. Reference specific data. 12-18 words.
+${BOTS[bear].name}'s concern: "${chat[chat.length - 1].split(': ')[1]}"
       `, chat);
       
       await say(bull, bullArg);
       chat.push(`${BOTS[bull].name}: ${bullArg}`);
-      await sleep(3000);
+      await sleep(3500);
 
-      // Bear responds
       const bearResp = await generate(bear, `
-${BOTS[bull].name} made a bullish case for $${token.symbol}: "${bullArg}"
+${BOTS[bull].name} pushed back: "${bullArg}"
 
-Your concerns:
-${scores.lpScore < 60 ? '- LP at ' + d.lpRatio + '% is ' + scores.lpVerdict : ''}
-${scores.taScore < 50 ? '- TA shows ' + scores.taVerdict : ''}
-${d.whales === 'selling' ? '- Whale selling detected' : ''}
-
-But also consider: ${d.holdersFormatted} holders is ${scores.holderVerdict}
-
-Respond to ${BOTS[bull].name}. You can:
-- Push back with your concerns
-- Acknowledge their points and soften your stance
-- Stay neutral
-
-12-18 words.
+Respond - concede if valid, or maintain position.
+Don't start with their name. 10-18 words.
       `, chat);
       
       await say(bear, bearResp);
       chat.push(`${BOTS[bear].name}: ${bearResp}`);
+      
+      if (bearResp.toLowerCase().match(/fair|point|true|right|agree|fine|valid|maybe/)) {
+        if (opinions[bear] === 'bearish') opinions[bear] = 'neutral';
+      }
+      await sleep(3500);
+    }
+
+    // Someone else adds quick thought
+    const others = ALL_BOT_IDS.filter(b => b !== 'oracle' && !chat.some(c => c.startsWith(BOTS[b].name) && chat.indexOf(c) > chat.length - 3));
+    if (others.length > 0) {
+      const other = others[Math.floor(Math.random() * others.length)];
+      const extra = await generate(other, `
+$${sym} discussion. Add a brief fresh thought.
+Don't repeat what was said. Don't list names. 8-14 words.
+
+Recent:
+${chat.slice(-2).join('\n')}
+      `, chat);
+      
+      await say(other, extra);
+      chat.push(`${BOTS[other].name}: ${extra}`);
       await sleep(3000);
-
-      // Check if bear softened (look for concession language)
-      const softened = bearResp.toLowerCase().match(/fair|point|true|right|agree|fine|ok|maybe|could/);
-      if (softened && opinions[bear] === 'bearish') {
-        opinions[bear] = 'neutral';
-      }
-
-      // Another bot can weigh in
-      const others = ALL_BOT_IDS.filter(b => b !== bull && b !== bear && b !== 'oracle');
-      if (others.length > 0) {
-        const other = others[Math.floor(Math.random() * others.length)];
-        const otherOpinion = opinions[other];
-        
-        const weighIn = await generate(other, `
-${BOTS[bull].name} and ${BOTS[bear].name} debating $${token.symbol}.
-
-Your analysis says: ${otherOpinion}
-
-Chat:
-${chat.slice(-3).join('\n')}
-
-Quick take - who do you agree with? Or add something new. 10-15 words.
-        `, chat);
-        
-        await say(other, weighIn);
-        chat.push(`${BOTS[other].name}: ${weighIn}`);
-        await sleep(2500);
-      }
     }
 
     // =========================================================
-    // PHASE 6: Mike's verdict
+    // PHASE 7: Mike verdict
     // =========================================================
 
-    const mikeOpinion = opinions.oracle;
+    const mikePoints = summary.forMike.slice(0, 2);
     const mikeMsg = await generate('oracle', `
-Council debated $${token.symbol}.
+$${sym} - time for verdict.
 
-Key data:
-- Overall score: ${scores.overall.toFixed(0)}/100
-- ${d.holdersFormatted} holders (${scores.holderVerdict})
-- TA: ${scores.taVerdict}
-- OBV: ${d.obv}
-${d.bullishFactors.length > 0 ? '- Bullish: ' + d.bullishFactors.slice(0, 2).join(', ') : ''}
+MY HIDDEN INSIGHTS:
+${mikePoints.map(p => '• ' + p).join('\n')}
 
-Your calculated opinion: ${mikeOpinion}
+Score: ${scores.overall.toFixed(0)}/100
+I'm ${opinions.oracle}.
 
-Chat:
-${chat.slice(-3).join('\n')}
-
-Final cryptic take. Clear direction. 8-14 words.
+Cryptic but clear direction. Don't list names. 8-14 words.
     `, chat);
     
     await say('oracle', mikeMsg);
     chat.push(`Mike: ${mikeMsg}`);
-    await sleep(3000);
+    await sleep(3500);
 
     // =========================================================
-    // PHASE 7: James final react
+    // PHASE 8: Quick reaction
     // =========================================================
 
-    const jamesFinal = await generate('chad', `
+    const reactor = Math.random() > 0.5 ? 'chad' : 'sensei';
+    const reaction = await generate(reactor, `
 Mike said: "${mikeMsg}"
 
-Mike is ${mikeOpinion}. The group respects his calls.
-
-Quick reaction. 6-12 words.
+Quick natural reaction. 5-10 words. Don't start with "Mike,".
     `, chat);
     
-    await say('chad', jamesFinal);
+    await say(reactor, reaction);
     await sleep(2500);
 
     // =========================================================
-    // PHASE 8: Vote
+    // PHASE 9: Vote
     // =========================================================
 
-    await systemMsg(`🗳️ Vote on $${token.symbol}`);
-    await sleep(1500);
+    await systemMsg(`🗳️ Vote on $${sym}`);
+    await sleep(2000);
 
     for (const botId of ALL_BOT_IDS) {
       const op = opinions[botId];
       const emoji = op === 'bullish' ? '🟢' : op === 'bearish' ? '🔴' : '⚪';
       const word = op === 'bullish' ? 'in' : op === 'bearish' ? 'out' : 'pass';
       await say(botId, `${emoji} ${word}`);
-      await sleep(600);
+      await sleep(800);
     }
 
     const finalBulls = ALL_BOT_IDS.filter(b => opinions[b] === 'bullish');
     const verdict: 'buy' | 'pass' = finalBulls.length >= 2 ? 'buy' : 'pass';
 
-    await sleep(1000);
+    await sleep(1500);
     await systemMsg(`📊 ${verdict.toUpperCase()} (${finalBulls.length}/5) | Score: ${scores.overall.toFixed(0)}/100`);
 
     await saveToken(token, { tokenAddress: token.address, riskScore, flags, verdict, opinions: opinions as any });
@@ -662,7 +723,7 @@ Quick reaction. 6-12 words.
     // =========================================================
 
     if (verdict === 'buy') {
-      await sleep(1500);
+      await sleep(2000);
 
       for (const botId of finalBulls) {
         const { allowed, reason } = await canBotTrade(botId);
@@ -677,8 +738,8 @@ Quick reaction. 6-12 words.
         const size = calculateTradeSize(botId, balance, Math.min(85, scores.overall));
         if (size < 0.3) continue;
 
-        await say(botId, `aping ${size.toFixed(1)} MON`);
-        await sleep(800);
+        await say(botId, `aping ${size.toFixed(1)} MON 🎯`);
+        await sleep(1200);
 
         const trade = await executeBotTrade(botId, token, size, 'buy');
 
@@ -692,11 +753,11 @@ Quick reaction. 6-12 words.
             entryValueMon: size,
             entryTxHash: trade.txHash,
           });
-          await say(botId, `got ${trade.amountOut.toFixed(0)} $${token.symbol} ✅`);
+          await say(botId, `scooped ${trade.amountOut.toFixed(0)} $${token.symbol} ✅`);
         } else {
-          await say(botId, `trade failed`);
+          await say(botId, `tx failed`);
         }
-        await sleep(1000);
+        await sleep(1500);
       }
     }
 
@@ -708,26 +769,28 @@ Quick reaction. 6-12 words.
 }
 
 // ============================================================
-// MESSAGE GENERATION
+// MESSAGE GENERATION — Anti-duplicate, no name lists
 // ============================================================
 
 async function generate(botId: BotId, prompt: string, chat: string[]): Promise<string> {
   const bot = BOTS[botId];
   
-  const systemPrompt = `You are ${bot.name}, a crypto trader.
+  const systemPrompt = `You are ${bot.name}, a crypto trader in a group chat.
 
 STYLE: ${bot.style}
 
-RULES:
-- Don't start with "yo" or "hey"
-- Be natural, like a real group chat
-- Use names when responding to people
-- Stay concise
-- Monad holder thresholds:
-  * 1000+ = solid
-  * 5000+ = strong
-  * 10000+ = huge
-  * 20000+ = massive`;
+ABSOLUTE RULES:
+1. NEVER start messages with lists of names like "James, Keone, Portdev,"
+2. NEVER start with "yo", "hey", "oh", "so", "well", "look"
+3. If responding to someone, either use their name naturally mid-sentence OR don't use it at all
+4. Keep it natural like a real group chat
+5. Use ONLY the real prices/numbers given to you - never invent prices
+6. Don't repeat what others already said
+
+BAD: "James, Keone, the RSI looks good"
+BAD: "Guys, the chart shows..."
+GOOD: "RSI at 66 shows momentum, and that holder count backs it up"
+GOOD: "That's a solid setup - 31K holders don't lie"`;
 
   try {
     const res = await grok.chat.completions.create({
@@ -736,13 +799,18 @@ RULES:
         { role: 'system', content: systemPrompt },
         { role: 'user', content: prompt }
       ],
-      max_tokens: 70,
+      max_tokens: 85,
       temperature: 1.0,
     });
 
     let text = res.choices[0]?.message?.content || '';
-    text = text.replace(/^(yo|hey|oh|so),?\s*/i, '');
-    return text.trim().slice(0, 180);
+    
+    // Clean up common issues
+    text = text.replace(/^(yo|hey|oh|so|well|look|okay|guys),?\s*/i, '');
+    // Remove name lists at start
+    text = text.replace(/^(james|keone|portdev|harpal|mike)(,\s*(james|keone|portdev|harpal|mike))+,?\s*/i, '');
+    
+    return text.trim().slice(0, 220);
   } catch (e) {
     console.error(`Error for ${botId}:`, e);
     return 'interesting setup';
@@ -750,14 +818,19 @@ RULES:
 }
 
 // ============================================================
-// HELPERS
+// SAY — With duplicate prevention
 // ============================================================
 
 async function say(botId: BotId, content: string): Promise<void> {
   if (!content || content.length < 2) return;
-  const msgKey = `${botId}:${content.slice(0, 30)}`;
-  if (recentMessages.has(msgKey)) return;
-  recentMessages.add(msgKey);
+  
+  // Normalize for duplicate check
+  const normalized = content.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 50);
+  if (sentMessages.has(normalized)) {
+    console.log(`Skipping duplicate: ${content.slice(0, 30)}...`);
+    return;
+  }
+  sentMessages.add(normalized);
 
   const msg: Message = {
     id: randomUUID(),

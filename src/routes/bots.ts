@@ -1,19 +1,17 @@
 // ============================================================
-// BOTS ROUTES — Bot profiles, stats, trades
+// BOTS ROUTES v3 — Stats include open positions, holdings aggregated
 // ============================================================
 
 import { Hono } from 'hono';
 import { prisma } from '../db/index.js';
-import { getBotOpenPositions } from '../services/monitor.js';
+import { getBotConfig, ALL_BOT_IDS, type BotId } from '../bots/personalities.js';
 import { getBotBalance } from '../services/trading.js';
-import { getBotConfig, ALL_BOT_IDS } from '../bots/personalities.js';
-import type { BotId } from '../types/index.js';
-import type { Trade } from '../types/index.js';
+import { getTokenPrice } from '../services/nadfun.js';
 
 export const botsRouter = new Hono();
 
 // ============================================================
-// GET /api/bots — Leaderboard (all bots)
+// GET /api/bots — List all bots with basic info
 // ============================================================
 
 botsRouter.get('/', async (c) => {
@@ -21,48 +19,25 @@ botsRouter.get('/', async (c) => {
     const bots = await Promise.all(ALL_BOT_IDS.map(async (botId) => {
       const config = getBotConfig(botId);
       
-      // Get stats
-      const stats = await prisma.botStats.findUnique({
-        where: { botId },
-      });
-      
       // Get open positions count
       const openPositions = await prisma.position.count({
         where: { botId, isOpen: true },
       });
       
-      // Get balance
-      const balance = await getBotBalance(botId);
+      // Get closed trades count
+      const closedTrades = await prisma.position.count({
+        where: { botId, isOpen: false },
+      });
       
       return {
-        botId,
+        id: botId,
         name: config?.name || botId,
-        imgURL: config?.imgURL || '',
+        avatar: config?.avatar || '🤖',
         personality: config?.personality || '',
-        stats: stats ? {
-          totalTrades: stats.totalTrades,
-          wins: stats.wins,
-          losses: stats.losses,
-          winRate: Number(stats.winRate),
-          totalPnl: Number(stats.totalPnl),
-          currentStreak: stats.currentStreak,
-          bestStreak: stats.bestStreak,
-        } : {
-          totalTrades: 0,
-          wins: 0,
-          losses: 0,
-          winRate: 0,
-          totalPnl: 0,
-          currentStreak: 0,
-          bestStreak: 0,
-        },
         openPositions,
-        balance,
+        closedTrades,
       };
     }));
-    
-    // Sort by winRate desc
-    bots.sort((a, b) => b.stats.winRate - a.stats.winRate);
     
     return c.json({ bots });
   } catch (error) {
@@ -72,77 +47,114 @@ botsRouter.get('/', async (c) => {
 });
 
 // ============================================================
-// GET /api/bots/:id — Bot profile
+// GET /api/bots/:botId — Single bot profile with REAL stats & holdings
 // ============================================================
 
-botsRouter.get('/:id', async (c) => {
+botsRouter.get('/:botId', async (c) => {
   try {
-    const botId = c.req.param('id') as BotId;
+    const botId = c.req.param('botId') as BotId;
+    const config = getBotConfig(botId);
     
-    if (!ALL_BOT_IDS.includes(botId)) {
+    if (!config) {
       return c.json({ error: 'Bot not found' }, 404);
     }
     
-    const config = getBotConfig(botId);
-    
-    // Get stats
-    const stats = await prisma.botStats.findUnique({
-      where: { botId },
-    });
-    
-    // Get open positions with current PnL
-    const positions = await getBotOpenPositions(botId);
-    
-    // Get recent trades
-    const recentTrades = await prisma.trade.findMany({
+    // Get all positions (open and closed)
+    const allPositions = await prisma.position.findMany({
       where: { botId },
       orderBy: { createdAt: 'desc' },
-      take: 20,
     });
     
-    // Get balance
-    const balance = await getBotBalance(botId);
+    const openPositions = allPositions.filter(p => p.isOpen);
+    const closedPositions = allPositions.filter(p => !p.isOpen);
     
-    // Calculate total holdings value
-    const holdingsValue = positions.reduce((sum, p) => sum + (p.amount * p.currentPrice), 0);
+    // Calculate stats from CLOSED positions (realized PnL)
+    const wins = closedPositions.filter(p => p.pnl && Number(p.pnl) > 0).length;
+    const losses = closedPositions.filter(p => p.pnl && Number(p.pnl) <= 0).length;
+    const totalClosedTrades = closedPositions.length;
+    const winRate = totalClosedTrades > 0 ? (wins / totalClosedTrades) * 100 : 0;
+    const realizedPnl = closedPositions.reduce((sum, p) => sum + (p.pnl ? Number(p.pnl) : 0), 0);
+    
+    // Calculate streak from recent closed trades
+    let currentStreak = 0;
+    let bestStreak = 0;
+    let tempStreak = 0;
+    
+    for (const trade of closedPositions) {
+      const isWin = trade.pnl && Number(trade.pnl) > 0;
+      if (currentStreak === 0) {
+        currentStreak = isWin ? 1 : -1;
+        tempStreak = currentStreak;
+      } else if ((currentStreak > 0 && isWin) || (currentStreak < 0 && !isWin)) {
+        tempStreak += isWin ? 1 : -1;
+      } else {
+        break; // Streak broken
+      }
+    }
+    currentStreak = tempStreak;
+    bestStreak = Math.max(bestStreak, Math.abs(currentStreak));
+    
+    // Get MON balance
+    let balance = 0;
+    try {
+      balance = await getBotBalance(botId);
+    } catch (e) {
+      console.error(`Failed to get balance for ${botId}:`, e);
+    }
+    
+    // Aggregate holdings by token
+    const aggregatedHoldings = await aggregateHoldings(openPositions);
+    
+    // Calculate totals
+    const totalHoldingsValue = aggregatedHoldings.reduce((sum, h) => sum + h.currentValue, 0);
+    const totalUnrealizedPnl = aggregatedHoldings.reduce((sum, h) => sum + h.unrealizedPnl, 0);
+    const totalUnrealizedPnlPercent = aggregatedHoldings.reduce((sum, h) => sum + h.totalEntryValue, 0) > 0
+      ? (totalUnrealizedPnl / aggregatedHoldings.reduce((sum, h) => sum + h.totalEntryValue, 0)) * 100
+      : 0;
     
     return c.json({
-      botId,
-      name: config?.name || botId,
-      imgURL: config?.imgURL || '',
-      personality: config?.personality || '',
-      style: config?.style || '',
-      balance,
-      holdingsValue,
-      stats: stats ? {
-        totalTrades: stats.totalTrades,
-        wins: stats.wins,
-        losses: stats.losses,
-        winRate: Number(stats.winRate),
-        totalPnl: Number(stats.totalPnl),
-        currentStreak: stats.currentStreak,
-        bestStreak: stats.bestStreak,
-      } : null,
-      positions: positions.map(p => ({
-        tokenAddress: p.tokenAddress,
-        tokenSymbol: p.tokenSymbol,
-        amount: p.amount,
-        entryPrice: p.entryPrice,
-        currentPrice: p.currentPrice,
-        pnlPercent: p.pnlPercent,
-        holdTimeHours: p.holdTimeHours,
-        createdAt: p.createdAt,
-      })),
-      recentTrades: recentTrades.map((t: Trade) => ({
+      bot: {
+        id: botId,
+        name: config.name,
+        avatar: config.avatar,
+        personality: config.personality,
+        style: config.style,
+        walletAddress: config.walletAddress,
+      },
+      stats: {
+        // Open positions (current)
+        openPositions: openPositions.length,
+        
+        // Closed trades (realized)
+        totalTrades: totalClosedTrades,
+        wins,
+        losses,
+        winRate: Math.round(winRate * 10) / 10,
+        
+        // PnL
+        realizedPnl: Math.round(realizedPnl * 1000) / 1000,
+        unrealizedPnl: Math.round(totalUnrealizedPnl * 1000) / 1000,
+        unrealizedPnlPercent: Math.round(totalUnrealizedPnlPercent * 10) / 10,
+        totalPnl: Math.round((realizedPnl + totalUnrealizedPnl) * 1000) / 1000,
+        
+        // Streaks
+        currentStreak,
+        bestStreak,
+      },
+      balance: {
+        mon: Math.round(balance * 1000) / 1000,
+        holdingsValue: Math.round(totalHoldingsValue * 1000) / 1000,
+        totalValue: Math.round((balance + totalHoldingsValue) * 1000) / 1000,
+      },
+      holdings: aggregatedHoldings,
+      recentTrades: closedPositions.slice(0, 10).map(t => ({
         id: t.id,
         tokenSymbol: t.tokenSymbol,
-        side: t.side,
-        amountIn: Number(t.amountIn),
-        amountOut: Number(t.amountOut),
-        price: Number(t.price),
-        pnl: t.pnl ? Number(t.pnl) : null,
-        status: t.status,
-        createdAt: t.createdAt,
+        pnl: t.pnl ? Number(t.pnl) : 0,
+        pnlPercent: t.entryPrice && t.exitPrice 
+          ? ((Number(t.exitPrice) - Number(t.entryPrice)) / Number(t.entryPrice)) * 100 
+          : 0,
+        closedAt: t.closedAt,
       })),
     });
   } catch (error) {
@@ -152,37 +164,79 @@ botsRouter.get('/:id', async (c) => {
 });
 
 // ============================================================
-// GET /api/bots/:id/trades — Bot trade history
+// GET /api/bots/:botId/holdings — Bot holdings (aggregated)
 // ============================================================
 
-botsRouter.get('/:id/trades', async (c) => {
+botsRouter.get('/:botId/holdings', async (c) => {
   try {
-    const botId = c.req.param('id') as BotId;
+    const botId = c.req.param('botId') as BotId;
+    
+    const positions = await prisma.position.findMany({
+      where: { botId, isOpen: true },
+    });
+    
+    const aggregatedHoldings = await aggregateHoldings(positions);
+    
+    const totalEntryValue = aggregatedHoldings.reduce((sum, h) => sum + h.totalEntryValue, 0);
+    const totalValue = aggregatedHoldings.reduce((sum, h) => sum + h.currentValue, 0);
+    const totalUnrealizedPnl = aggregatedHoldings.reduce((sum, h) => sum + h.unrealizedPnl, 0);
+    
+    return c.json({
+      holdings: aggregatedHoldings,
+      summary: {
+        totalTokens: aggregatedHoldings.length,
+        totalEntryValue: Math.round(totalEntryValue * 1000) / 1000,
+        totalValue: Math.round(totalValue * 1000) / 1000,
+        totalUnrealizedPnl: Math.round(totalUnrealizedPnl * 1000) / 1000,
+        totalUnrealizedPnlPercent: totalEntryValue > 0 
+          ? Math.round((totalUnrealizedPnl / totalEntryValue) * 1000) / 10
+          : 0,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching holdings:', error);
+    return c.json({ error: 'Failed to fetch holdings' }, 500);
+  }
+});
+
+// ============================================================
+// GET /api/bots/:botId/trades — Bot trade history (closed positions)
+// ============================================================
+
+botsRouter.get('/:botId/trades', async (c) => {
+  try {
+    const botId = c.req.param('botId') as BotId;
     const limit = parseInt(c.req.query('limit') || '50');
     
-    if (!ALL_BOT_IDS.includes(botId)) {
-      return c.json({ error: 'Bot not found' }, 404);
-    }
-    
-    const trades = await prisma.trade.findMany({
-      where: { botId },
-      orderBy: { createdAt: 'desc' },
+    const trades = await prisma.position.findMany({
+      where: { 
+        botId,
+        isOpen: false,
+      },
+      orderBy: { closedAt: 'desc' },
       take: limit,
     });
     
     return c.json({
-      trades: trades.map((t: Trade) => ({
+      trades: trades.map(t => ({
         id: t.id,
-        tokenAddress: t.tokenAddress,
         tokenSymbol: t.tokenSymbol,
-        side: t.side,
-        amountIn: Number(t.amountIn),
-        amountOut: Number(t.amountOut),
-        price: Number(t.price),
-        pnl: t.pnl ? Number(t.pnl) : null,
-        status: t.status,
-        txHash: t.txHash,
-        createdAt: t.createdAt,
+        tokenAddress: t.tokenAddress,
+        amount: Number(t.amount),
+        entryPrice: Number(t.entryPrice),
+        exitPrice: t.exitPrice ? Number(t.exitPrice) : null,
+        entryValueMon: Number(t.entryValueMon),
+        pnl: t.pnl ? Number(t.pnl) : 0,
+        pnlPercent: t.entryValueMon && t.pnl
+          ? (Number(t.pnl) / Number(t.entryValueMon)) * 100 
+          : 0,
+        entryTxHash: t.entryTxHash,
+        exitTxHash: t.exitTxHash,
+        openedAt: t.createdAt,
+        closedAt: t.closedAt,
+        durationMinutes: t.closedAt && t.createdAt 
+          ? Math.floor((new Date(t.closedAt).getTime() - new Date(t.createdAt).getTime()) / 1000 / 60)
+          : null,
       })),
     });
   } catch (error) {
@@ -192,24 +246,89 @@ botsRouter.get('/:id/trades', async (c) => {
 });
 
 // ============================================================
-// GET /api/bots/:id/positions — Bot open positions
+// HELPER: Aggregate holdings by token
 // ============================================================
 
-botsRouter.get('/:id/positions', async (c) => {
-  try {
-    const botId = c.req.param('id') as BotId;
+interface AggregatedHolding {
+  tokenAddress: string;
+  tokenSymbol: string;
+  totalAmount: number;
+  avgEntryPrice: number;
+  totalEntryValue: number;
+  currentPrice: number;
+  currentValue: number;
+  unrealizedPnl: number;
+  unrealizedPnlPercent: number;
+  positionCount: number;
+  firstEntry: Date;
+  lastEntry: Date;
+}
+
+async function aggregateHoldings(positions: any[]): Promise<AggregatedHolding[]> {
+  if (!positions || positions.length === 0) return [];
+  
+  // Group by token address
+  const byToken: Record<string, any[]> = {};
+  for (const pos of positions) {
+    const addr = pos.tokenAddress;
+    if (!byToken[addr]) byToken[addr] = [];
+    byToken[addr].push(pos);
+  }
+  
+  const holdings: AggregatedHolding[] = [];
+  
+  for (const [tokenAddress, tokenPositions] of Object.entries(byToken)) {
+    const totalAmount = tokenPositions.reduce((sum, p) => sum + Number(p.amount), 0);
+    const totalEntryValue = tokenPositions.reduce((sum, p) => sum + Number(p.entryValueMon || 0), 0);
     
-    if (!ALL_BOT_IDS.includes(botId)) {
-      return c.json({ error: 'Bot not found' }, 404);
+    // Weighted average entry price
+    const weightedPriceSum = tokenPositions.reduce(
+      (sum, p) => sum + (Number(p.entryPrice) * Number(p.amount)), 
+      0
+    );
+    const avgEntryPrice = totalAmount > 0 ? weightedPriceSum / totalAmount : 0;
+    
+    // Get current price
+    let currentPrice = avgEntryPrice;
+    try {
+      const priceData = await getTokenPrice(tokenAddress);
+      if (priceData) {
+        currentPrice = typeof priceData === 'number' ? priceData : priceData.price || avgEntryPrice;
+      }
+    } catch (e) {
+      console.error(`Failed to get price for ${tokenAddress}:`, e);
     }
     
-    const positions = await getBotOpenPositions(botId);
+    const currentValue = totalAmount * currentPrice;
+    const unrealizedPnl = currentValue - totalEntryValue;
+    const unrealizedPnlPercent = totalEntryValue > 0 
+      ? (unrealizedPnl / totalEntryValue) * 100 
+      : 0;
     
-    return c.json({ positions });
-  } catch (error) {
-    console.error('Error fetching positions:', error);
-    return c.json({ error: 'Failed to fetch positions' }, 500);
+    const dates = tokenPositions.map(p => new Date(p.createdAt));
+    const firstEntry = new Date(Math.min(...dates.map(d => d.getTime())));
+    const lastEntry = new Date(Math.max(...dates.map(d => d.getTime())));
+    
+    holdings.push({
+      tokenAddress,
+      tokenSymbol: tokenPositions[0].tokenSymbol,
+      totalAmount: Math.round(totalAmount * 100) / 100,
+      avgEntryPrice,
+      totalEntryValue: Math.round(totalEntryValue * 1000) / 1000,
+      currentPrice,
+      currentValue: Math.round(currentValue * 1000) / 1000,
+      unrealizedPnl: Math.round(unrealizedPnl * 1000) / 1000,
+      unrealizedPnlPercent: Math.round(unrealizedPnlPercent * 10) / 10,
+      positionCount: tokenPositions.length,
+      firstEntry,
+      lastEntry,
+    });
   }
-});
+  
+  // Sort by current value descending
+  holdings.sort((a, b) => b.currentValue - a.currentValue);
+  
+  return holdings;
+}
 
 export default botsRouter;

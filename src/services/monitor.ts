@@ -1,255 +1,226 @@
 // ============================================================
-// POSITION MONITOR — Auto sell at TP/SL
+// MONITOR v2 — Position monitoring, stats tracking, daily resets
 // ============================================================
 
-import { prisma } from '../db/index.js';
-import { closeBotPosition, getBotBalance } from './trading.js';
-import { getTokenPrice, getTokenInfo } from './nadfun.js';
+import { prisma, getOpenPositions, closePosition } from '../db/index.js';
+import { getTokenPrice } from './nadfun.js';
+import { executeBotTrade, getBotBalance } from './trading.js';
 import { broadcastMessage } from './websocket.js';
+import { getBotConfig, ALL_BOT_IDS, type BotId } from '../bots/personalities.js';
 import { randomUUID } from 'crypto';
-import type { BotId, Token } from '../types/index.js';
 
 // ============================================================
 // CONFIG
 // ============================================================
 
-export const TRADING_CONFIG = {
-  // Take Profit / Stop Loss
-  takeProfitPercent: 50,    // +50% → sell
-  stopLossPercent: -30,     // -30% → sell
-  
-  // Time-based exit
-  maxHoldTimeHours: 24,     // Sell after 24h regardless
-  
-  // Limits per bot
-  maxOpenPositions: 5,      // Max 5 positions per bot
-  maxDailyTrades: 10,       // Max 10 trades per day per bot
-  maxTotalInvested: 50,     // Max 50 MON invested per bot
-  
-  // Monitor interval
-  checkIntervalMs: 60_000,  // Check every 60 seconds (avoid rate limit)
-};
+const MONITOR_INTERVAL = 30_000;      // Check positions every 30s
+const TAKE_PROFIT_PERCENT = 50;       // +50% = take profit
+const STOP_LOSS_PERCENT = -30;        // -30% = stop loss
+const MAX_POSITION_AGE_HOURS = 24;    // Close after 24h regardless
+const MAX_OPEN_POSITIONS = 5;         // Per bot
 
 // ============================================================
 // STATE
 // ============================================================
 
 let isRunning = false;
-let monitorInterval: NodeJS.Timeout | null = null;
+let lastDailyReset: string | null = null;
 
 // ============================================================
-// START / STOP
+// MAIN MONITOR LOOP
 // ============================================================
 
-export function startPositionMonitor(): void {
+export async function startMonitor(): Promise<void> {
   if (isRunning) return;
-  
   isRunning = true;
-  console.log('📊 Position monitor started');
   
-  // Run immediately, then on interval
-  checkAllPositions();
-  monitorInterval = setInterval(checkAllPositions, TRADING_CONFIG.checkIntervalMs);
+  console.log('📊 Position Monitor v2 started');
+  
+  while (isRunning) {
+    try {
+      // Check for daily reset
+      await checkDailyReset();
+      
+      // Monitor all bot positions
+      for (const botId of ALL_BOT_IDS) {
+        await monitorBotPositions(botId);
+      }
+    } catch (error) {
+      console.error('Monitor error:', error);
+    }
+    
+    await sleep(MONITOR_INTERVAL);
+  }
 }
 
-export function stopPositionMonitor(): void {
-  if (monitorInterval) {
-    clearInterval(monitorInterval);
-    monitorInterval = null;
-  }
+export function stopMonitor(): void {
   isRunning = false;
-  console.log('📊 Position monitor stopped');
 }
 
 // ============================================================
-// MAIN CHECK LOOP
+// POSITION MONITORING
 // ============================================================
 
-async function checkAllPositions(): Promise<void> {
-  try {
-    const positions = await prisma.position.findMany({
-      where: { isOpen: true },
-    });
-    
-    if (positions.length === 0) return;
-    
-    console.log(`📊 Checking ${positions.length} open positions...`);
-    
-    for (const position of positions) {
-      await checkPosition(position);
-      // Small delay to avoid rate limiting
-      await new Promise(r => setTimeout(r, 500));
+async function monitorBotPositions(botId: BotId): Promise<void> {
+  const positions = await getOpenPositions(botId);
+  
+  for (const pos of positions) {
+    try {
+      // Get current price
+      const priceData = await getTokenPrice(pos.tokenAddress);
+      if (!priceData?.price) continue;
+      
+      const currentPrice = priceData.price;
+      const entryPrice = Number(pos.entryPrice);
+      const pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+      
+      // Calculate position age
+      const ageHours = (Date.now() - new Date(pos.createdAt).getTime()) / (1000 * 60 * 60);
+      
+      let shouldClose = false;
+      let reason = '';
+      
+      // Check take profit
+      if (pnlPercent >= TAKE_PROFIT_PERCENT) {
+        shouldClose = true;
+        reason = `TP hit +${pnlPercent.toFixed(1)}%`;
+      }
+      // Check stop loss
+      else if (pnlPercent <= STOP_LOSS_PERCENT) {
+        shouldClose = true;
+        reason = `SL hit ${pnlPercent.toFixed(1)}%`;
+      }
+      // Check max age
+      else if (ageHours >= MAX_POSITION_AGE_HOURS) {
+        shouldClose = true;
+        reason = `Max age ${ageHours.toFixed(1)}h`;
+      }
+      
+      if (shouldClose) {
+        await closePositionWithTrade(botId, pos, currentPrice, reason);
+      }
+    } catch (error) {
+      console.error(`Error monitoring position ${pos.id}:`, error);
     }
-  } catch (error) {
-    console.error('Monitor error:', error);
-  }
-}
-
-async function checkPosition(position: {
-  id: string;
-  botId: string;
-  tokenAddress: string;
-  tokenSymbol: string;
-  amount: any;
-  entryPrice: any;
-  entryValueMon?: any;
-  createdAt: Date;
-}): Promise<void> {
-  try {
-    const tokenAmount = Number(position.amount);
-    const entryValueMON = Number((position as any).entryValueMon) || 0;
-    
-    // If no entry value stored, skip (old position)
-    if (entryValueMON === 0) {
-      console.log(`⚠️ Position ${position.id} has no entryValueMon, skipping`);
-      return;
-    }
-    
-    // Get current token price
-    const currentPricePerToken = await getTokenPrice(position.tokenAddress);
-    if (!currentPricePerToken || currentPricePerToken === 0) return;
-    
-    // Calculate current value in MON
-    const currentValueMON = tokenAmount * currentPricePerToken;
-    
-    // Calculate PnL
-    const pnlMON = currentValueMON - entryValueMON;
-    const pnlPercent = (pnlMON / entryValueMON) * 100;
-    
-    // Check hold time
-    const holdTimeHours = (Date.now() - position.createdAt.getTime()) / (1000 * 60 * 60);
-    
-    let shouldSell = false;
-    let reason = '';
-    
-    // Take Profit
-    if (pnlPercent >= TRADING_CONFIG.takeProfitPercent) {
-      shouldSell = true;
-      reason = `TP hit +${pnlPercent.toFixed(1)}% (+${pnlMON.toFixed(2)} MON)`;
-    }
-    // Stop Loss
-    else if (pnlPercent <= TRADING_CONFIG.stopLossPercent) {
-      shouldSell = true;
-      reason = `SL hit ${pnlPercent.toFixed(1)}% (${pnlMON.toFixed(2)} MON)`;
-    }
-    // Time exit
-    else if (holdTimeHours >= TRADING_CONFIG.maxHoldTimeHours) {
-      shouldSell = true;
-      reason = `time exit (${holdTimeHours.toFixed(1)}h) at ${pnlPercent.toFixed(1)}%`;
-    }
-    
-    if (shouldSell) {
-      await executeExit(position, currentValueMON, pnlPercent, reason);
-    }
-  } catch (error) {
-    console.error(`Error checking position ${position.id}:`, error);
   }
 }
 
 // ============================================================
-// EXECUTE EXIT
+// CLOSE POSITION
 // ============================================================
 
-async function executeExit(
-  position: {
-    id: string;
-    botId: string;
-    tokenAddress: string;
-    tokenSymbol: string;
-    amount: any;
-    entryPrice: any;
-  },
-  exitValueMON: number,
-  pnlPercent: number,
+async function closePositionWithTrade(
+  botId: BotId, 
+  position: any, 
+  currentPrice: number,
   reason: string
 ): Promise<void> {
-  const botId = position.botId as BotId;
-  const isWin = pnlPercent > 0;
+  const config = getBotConfig(botId);
+  const entryPrice = Number(position.entryPrice);
+  const pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+  const pnlMon = Number(position.amount) * (currentPrice - entryPrice);
   
-  console.log(`🔔 ${botId} selling $${position.tokenSymbol}: ${reason}`);
+  console.log(`📤 Closing ${position.tokenSymbol} for ${config?.name}: ${reason}`);
   
-  // Broadcast sell message
-  broadcastMessage({
-    id: randomUUID(),
-    botId,
-    content: `selling $${position.tokenSymbol} — ${reason} ${isWin ? '✅' : '❌'}`,
-    token: position.tokenAddress,
-    messageType: 'trade',
-    createdAt: new Date(),
-  });
+  // Execute sell trade
+  const trade = await executeBotTrade(
+    botId, 
+    { address: position.tokenAddress, symbol: position.tokenSymbol } as any,
+    Number(position.amount),
+    'sell'
+  );
   
-  try {
-    // Build token object for closeBotPosition
-    const token: Token = {
-      address: position.tokenAddress,
-      symbol: position.tokenSymbol,
-      name: position.tokenSymbol,
-      price: 0, // Not used for sell
-      priceChange24h: 0,
-      mcap: 0,
-      liquidity: 0,
-      holders: 0,
-      deployer: '',
+  if (trade?.status === 'confirmed') {
+    // Close position in DB
+    await closePosition(position.id, currentPrice, pnlMon, trade.txHash);
+    
+    // Update bot stats
+    await updateBotStats(botId, pnlMon > 0, pnlMon, Number(position.entryValueMon || 0));
+    
+    // Broadcast message
+    const emoji = pnlMon >= 0 ? '🟢' : '🔴';
+    const msg = {
+      id: randomUUID(),
+      botId,
+      content: `${emoji} Closed $${position.tokenSymbol} | ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(1)}% | ${reason}`,
+      messageType: 'trade' as const,
       createdAt: new Date(),
     };
-    
-    // Execute sell
-    const trade = await closeBotPosition(botId, token);
-    
-    if (trade && trade.status === 'confirmed') {
-      // Close position in DB
-      await prisma.position.update({
-        where: { id: position.id },
-        data: {
-          isOpen: false,
-          exitPrice: exitValueMON / Number(position.amount), // Store price per token
-          exitTxHash: trade.txHash,
-          pnl: pnlPercent,
-          closedAt: new Date(),
-        },
-      });
-      
-      // Update bot stats
-      await updateBotDailyStats(botId, isWin, pnlPercent, exitValueMON);
-      
-      // Broadcast result
-      const pnlEmoji = isWin ? '🟢' : '🔴';
-      broadcastMessage({
-        id: randomUUID(),
-        botId,
-        content: `${pnlEmoji} closed $${position.tokenSymbol} at ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(1)}%`,
-        token: position.tokenAddress,
-        messageType: 'trade',
-        createdAt: new Date(),
-      });
-    }
-  } catch (error) {
-    console.error(`Failed to exit position:`, error);
+    broadcastMessage(msg);
+  } else {
+    console.error(`Failed to close position ${position.id}`);
   }
 }
 
 // ============================================================
-// DAILY STATS
+// STATS UPDATES — This is the key fix!
 // ============================================================
 
-async function updateBotDailyStats(
-  botId: string,
-  isWin: boolean,
+export async function updateBotStats(
+  botId: BotId, 
+  isWin: boolean, 
   pnl: number,
   volume: number
 ): Promise<void> {
   const today = new Date().toISOString().split('T')[0];
   
   try {
+    // Update all-time stats
+    await prisma.botStats.upsert({
+      where: { botId },
+      create: {
+        botId,
+        totalTrades: 1,
+        wins: isWin ? 1 : 0,
+        losses: isWin ? 0 : 1,
+        winRate: isWin ? 100 : 0,
+        totalPnl: pnl,
+        currentStreak: isWin ? 1 : -1,
+        bestStreak: isWin ? 1 : 0,
+      },
+      update: {
+        totalTrades: { increment: 1 },
+        wins: { increment: isWin ? 1 : 0 },
+        losses: { increment: isWin ? 0 : 1 },
+        totalPnl: { increment: pnl },
+        // Update streak
+        currentStreak: isWin 
+          ? { increment: 1 }  // This doesn't work for resetting, need raw query
+          : { decrement: 1 },
+      },
+    });
+    
+    // Fix streak logic with raw update
+    const currentStats = await prisma.botStats.findUnique({ where: { botId } });
+    if (currentStats) {
+      let newStreak: number;
+      if (isWin) {
+        // If was negative or 0, start new win streak
+        newStreak = currentStats.currentStreak >= 0 ? currentStats.currentStreak + 1 : 1;
+      } else {
+        // If was positive or 0, start new loss streak
+        newStreak = currentStats.currentStreak <= 0 ? currentStats.currentStreak - 1 : -1;
+      }
+      
+      const newBestStreak = Math.max(currentStats.bestStreak, newStreak);
+      const newWinRate = currentStats.totalTrades > 0 
+        ? (currentStats.wins / currentStats.totalTrades) * 100 
+        : 0;
+      
+      await prisma.botStats.update({
+        where: { botId },
+        data: {
+          currentStreak: newStreak,
+          bestStreak: newBestStreak,
+          winRate: newWinRate,
+        },
+      });
+    }
+    
+    // Update daily stats
     await prisma.botDailyStats.upsert({
       where: {
         botId_date: { botId, date: today },
-      },
-      update: {
-        trades: { increment: 1 },
-        wins: { increment: isWin ? 1 : 0 },
-        pnl: { increment: pnl },
-        volume: { increment: volume },
       },
       create: {
         botId,
@@ -259,76 +230,104 @@ async function updateBotDailyStats(
         pnl,
         volume,
       },
+      update: {
+        trades: { increment: 1 },
+        wins: { increment: isWin ? 1 : 0 },
+        pnl: { increment: pnl },
+        volume: { increment: volume },
+      },
     });
     
-    await prisma.botStats.upsert({
-      where: { botId },
-      update: {
-        totalTrades: { increment: 1 },
-        wins: { increment: isWin ? 1 : 0 },
-        losses: { increment: isWin ? 0 : 1 },
-        totalPnl: { increment: pnl },
-        currentStreak: isWin ? { increment: 1 } : 0,
+    console.log(`📊 Stats updated for ${botId}: ${isWin ? 'WIN' : 'LOSS'} ${pnl.toFixed(2)} MON`);
+  } catch (error) {
+    console.error(`Failed to update stats for ${botId}:`, error);
+  }
+}
+
+// Call this when a trade is opened (to track volume even without PnL yet)
+export async function recordTradeOpen(botId: BotId, volumeMon: number): Promise<void> {
+  const today = new Date().toISOString().split('T')[0];
+  
+  try {
+    // Just increment volume for daily stats
+    await prisma.botDailyStats.upsert({
+      where: {
+        botId_date: { botId, date: today },
       },
       create: {
         botId,
-        totalTrades: 1,
-        wins: isWin ? 1 : 0,
-        losses: isWin ? 0 : 1,
-        winRate: isWin ? 100 : 0,
-        totalPnl: pnl,
-        currentStreak: isWin ? 1 : 0,
-        bestStreak: isWin ? 1 : 0,
+        date: today,
+        trades: 0,  // Don't count as trade until closed
+        wins: 0,
+        pnl: 0,
+        volume: volumeMon,
+      },
+      update: {
+        volume: { increment: volumeMon },
       },
     });
-    
-    const stats = await prisma.botStats.findUnique({ where: { botId } });
-    if (stats && stats.totalTrades > 0) {
-      await prisma.botStats.update({
-        where: { botId },
-        data: {
-          winRate: (stats.wins / stats.totalTrades) * 100,
-          bestStreak: Math.max(stats.bestStreak, stats.currentStreak),
-        },
-      });
-    }
   } catch (error) {
-    console.error('Failed to update daily stats:', error);
+    console.error(`Failed to record trade open for ${botId}:`, error);
   }
 }
 
 // ============================================================
-// TRADING LIMITS CHECK
+// DAILY RESET
 // ============================================================
 
-export async function canBotTrade(botId: string): Promise<{ allowed: boolean; reason?: string }> {
+async function checkDailyReset(): Promise<void> {
   const today = new Date().toISOString().split('T')[0];
   
-  const dailyStats = await prisma.botDailyStats.findUnique({
-    where: { botId_date: { botId, date: today } },
+  if (lastDailyReset !== today) {
+    console.log(`📅 New day: ${today} - Daily stats will accumulate fresh`);
+    lastDailyReset = today;
+    
+    // Could add any daily reset logic here
+    // Daily stats auto-separate by date, so no reset needed
+  }
+}
+
+// ============================================================
+// GET TODAY'S STATS
+// ============================================================
+
+export async function getTodayStats(): Promise<any[]> {
+  const today = new Date().toISOString().split('T')[0];
+  
+  const stats = await prisma.botDailyStats.findMany({
+    where: { date: today },
   });
   
-  if (dailyStats && dailyStats.trades >= TRADING_CONFIG.maxDailyTrades) {
-    return { allowed: false, reason: `max daily trades (${TRADING_CONFIG.maxDailyTrades})` };
+  return stats.map(s => ({
+    botId: s.botId,
+    trades: s.trades,
+    wins: s.wins,
+    winrate: s.trades > 0 ? (s.wins / s.trades) * 100 : 0,
+    pnl: Number(s.pnl),
+    volume: Number(s.volume),
+  }));
+}
+
+// ============================================================
+// CAN BOT TRADE — Check if bot can open new positions
+// ============================================================
+
+export async function canBotTrade(botId: BotId): Promise<{ allowed: boolean; reason?: string }> {
+  const positions = await getOpenPositions(botId);
+  
+  if (positions.length >= MAX_OPEN_POSITIONS) {
+    return { 
+      allowed: false, 
+      reason: `max ${MAX_OPEN_POSITIONS} positions` 
+    };
   }
   
-  const openPositions = await prisma.position.count({
-    where: { botId, isOpen: true },
-  });
-  
-  if (openPositions >= TRADING_CONFIG.maxOpenPositions) {
-    return { allowed: false, reason: `max open positions (${TRADING_CONFIG.maxOpenPositions})` };
-  }
-  
-  // Check total invested using entryValueMon
-  const positions = await prisma.position.findMany({
-    where: { botId, isOpen: true },
-  });
-  
-  const totalInvested = positions.reduce((sum: number, p: any) => sum + (Number((p as any).entryValueMon) || 0), 0);
-  
-  if (totalInvested >= TRADING_CONFIG.maxTotalInvested) {
-    return { allowed: false, reason: `max invested (${TRADING_CONFIG.maxTotalInvested} MON)` };
+  const balance = await getBotBalance(botId);
+  if (balance < 1) {
+    return { 
+      allowed: false, 
+      reason: 'insufficient balance' 
+    };
   }
   
   return { allowed: true };
@@ -338,66 +337,8 @@ export async function canBotTrade(botId: string): Promise<{ allowed: boolean; re
 // HELPERS
 // ============================================================
 
-export async function getBotOpenPositions(botId: string) {
-  const positions = await prisma.position.findMany({
-    where: { botId, isOpen: true },
-    orderBy: { createdAt: 'desc' },
-  });
-  
-  const enriched = await Promise.all(positions.map(async (p) => {
-    const tokenAmount = Number(p.amount);
-    const entryValueMON = Number((p as any).entryValueMon) || 0;
-    
-    // Get current token price
-    const currentPricePerToken = await getTokenPrice(p.tokenAddress);
-    const currentValueMON = currentPricePerToken ? tokenAmount * currentPricePerToken : entryValueMON;
-    
-    // PnL = (current - entry) / entry * 100
-    let pnlPercent = 0;
-    if (entryValueMON > 0) {
-      pnlPercent = ((currentValueMON - entryValueMON) / entryValueMON) * 100;
-    }
-    
-    // Clamp to reasonable range
-    pnlPercent = Math.max(-99, Math.min(9999, pnlPercent));
-    
-    return {
-      id: p.id,
-      tokenAddress: p.tokenAddress,
-      tokenSymbol: p.tokenSymbol,
-      amount: tokenAmount,
-      entryValueMON,
-      currentValueMON,
-      pnlPercent: Math.round(pnlPercent * 10) / 10,
-      holdTimeHours: (Date.now() - p.createdAt.getTime()) / (1000 * 60 * 60),
-      createdAt: p.createdAt,
-    };
-  }));
-  
-  return enriched;
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms));
 }
 
-export async function getAllOpenPositions() {
-  return prisma.position.findMany({
-    where: { isOpen: true },
-    orderBy: { createdAt: 'desc' },
-  });
-}
-
-export async function getTodayStats() {
-  const today = new Date().toISOString().split('T')[0];
-  
-  const stats = await prisma.botDailyStats.findMany({
-    where: { date: today },
-    orderBy: { pnl: 'desc' },
-  });
-  
-  return stats.map((s: any) => ({
-    botId: s.botId,
-    trades: s.trades,
-    wins: s.wins,
-    winrate: s.trades > 0 ? (s.wins / s.trades) * 100 : 0,
-    pnl: Number(s.pnl),
-    volume: Number(s.volume),
-  }));
-}
+export { MAX_OPEN_POSITIONS };
