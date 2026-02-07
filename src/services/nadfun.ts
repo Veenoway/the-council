@@ -1,5 +1,5 @@
 // ============================================================
-// NADFUN SERVICE — Token data and swaps using nad.fun API + viem
+// NADFUN SERVICE — With cache and rate limiting
 // ============================================================
 
 import { 
@@ -7,7 +7,6 @@ import {
   createWalletClient, 
   http, 
   parseEther, 
-  formatEther,
   encodeFunctionData,
   type PublicClient,
   type WalletClient,
@@ -51,6 +50,97 @@ const API_KEY = process.env.NADFUN_API_KEY || '';
 const headers: Record<string, string> = API_KEY ? { 'X-API-Key': API_KEY } : {};
 
 // ============================================================
+// CACHE — Avoid rate limiting
+// ============================================================
+
+interface CacheEntry<T> {
+  data: T;
+  timestamp: number;
+}
+
+const cache = {
+  market: new Map<string, CacheEntry<MarketInfo | null>>(),
+  swaps: new Map<string, CacheEntry<SwapInfo[]>>(),
+  price: new Map<string, CacheEntry<number | null>>(),
+};
+
+const CACHE_TTL = 60_000; // 60 seconds cache
+
+function getCached<T>(map: Map<string, CacheEntry<T>>, key: string): T | undefined {
+  const entry = map.get(key);
+  if (!entry) return undefined;
+  if (Date.now() - entry.timestamp > CACHE_TTL) {
+    map.delete(key);
+    return undefined;
+  }
+  return entry.data;
+}
+
+function setCache<T>(map: Map<string, CacheEntry<T>>, key: string, data: T): void {
+  map.set(key, { data, timestamp: Date.now() });
+}
+
+// ============================================================
+// RATE LIMITING
+// ============================================================
+
+let lastApiCall = 0;
+const MIN_API_INTERVAL = 1000; // 1 second between calls
+const apiQueue: Array<() => Promise<any>> = [];
+let isProcessingQueue = false;
+
+async function processQueue(): Promise<void> {
+  if (isProcessingQueue) return;
+  isProcessingQueue = true;
+  
+  while (apiQueue.length > 0) {
+    const now = Date.now();
+    const timeSinceLastCall = now - lastApiCall;
+    
+    if (timeSinceLastCall < MIN_API_INTERVAL) {
+      await new Promise(r => setTimeout(r, MIN_API_INTERVAL - timeSinceLastCall));
+    }
+    
+    const fn = apiQueue.shift();
+    if (fn) {
+      lastApiCall = Date.now();
+      await fn();
+    }
+  }
+  
+  isProcessingQueue = false;
+}
+
+async function rateLimitedFetch<T>(url: string): Promise<T | null> {
+  return new Promise((resolve) => {
+    apiQueue.push(async () => {
+      try {
+        const res = await fetch(url, { headers });
+        
+        if (res.status === 429) {
+          console.error(`Rate limited: ${url}`);
+          resolve(null);
+          return;
+        }
+        
+        if (!res.ok) {
+          console.error(`API error ${url}: ${res.status}`);
+          resolve(null);
+          return;
+        }
+        
+        const data = await res.json();
+        resolve(data as T);
+      } catch (e) {
+        console.error(`Fetch error ${url}:`, e);
+        resolve(null);
+      }
+    });
+    processQueue();
+  });
+}
+
+// ============================================================
 // CHAIN & CLIENTS
 // ============================================================
 
@@ -67,7 +157,7 @@ export const publicClient: PublicClient = createPublicClient({
 });
 
 // ============================================================
-// ABIs (minimal)
+// ABIs
 // ============================================================
 
 export const routerAbi = [
@@ -75,37 +165,33 @@ export const routerAbi = [
     name: 'buy',
     type: 'function',
     stateMutability: 'payable',
-    inputs: [
-      {
-        name: 'params',
-        type: 'tuple',
-        components: [
-          { name: 'amountOutMin', type: 'uint256' },
-          { name: 'token', type: 'address' },
-          { name: 'to', type: 'address' },
-          { name: 'deadline', type: 'uint256' },
-        ],
-      },
-    ],
+    inputs: [{
+      name: 'params',
+      type: 'tuple',
+      components: [
+        { name: 'amountOutMin', type: 'uint256' },
+        { name: 'token', type: 'address' },
+        { name: 'to', type: 'address' },
+        { name: 'deadline', type: 'uint256' },
+      ],
+    }],
     outputs: [{ type: 'uint256' }],
   },
   {
     name: 'sell',
     type: 'function',
     stateMutability: 'nonpayable',
-    inputs: [
-      {
-        name: 'params',
-        type: 'tuple',
-        components: [
-          { name: 'amountIn', type: 'uint256' },
-          { name: 'amountOutMin', type: 'uint256' },
-          { name: 'token', type: 'address' },
-          { name: 'to', type: 'address' },
-          { name: 'deadline', type: 'uint256' },
-        ],
-      },
-    ],
+    inputs: [{
+      name: 'params',
+      type: 'tuple',
+      components: [
+        { name: 'amountIn', type: 'uint256' },
+        { name: 'amountOutMin', type: 'uint256' },
+        { name: 'token', type: 'address' },
+        { name: 'to', type: 'address' },
+        { name: 'deadline', type: 'uint256' },
+      ],
+    }],
     outputs: [{ type: 'uint256' }],
   },
 ] as const;
@@ -158,102 +244,7 @@ export const lensAbi = [
 ] as const;
 
 // ============================================================
-// API HELPERS
-// ============================================================
-
-async function apiGet<T>(endpoint: string): Promise<T | null> {
-  try {
-    const url = `${CONFIG.apiUrl}${endpoint}`;
-    const res = await fetch(url, { headers });
-    if (!res.ok) {
-      console.error(`API error ${endpoint}: ${res.status}`);
-      return null;
-    }
-    return res.json();
-  } catch (e) {
-    console.error(`API error ${endpoint}:`, e);
-    return null;
-  }
-}
-
-// ============================================================
-// TRADING ANALYSIS — Analyze token metrics
-// ============================================================
-
-export interface TradingAnalysis {
-  liqRatio: number;
-  liqHealth: 'healthy' | 'warning' | 'danger';
-  riskLevel: 'low' | 'medium' | 'high' | 'extreme';
-  trend: 'bullish' | 'bearish' | 'neutral';
-  momentum: 'strong' | 'moderate' | 'weak';
-  volumeProfile: 'high' | 'medium' | 'low';
-  buyPressure: number;
-  bondingStatus: 'bonding' | 'graduated' | 'unknown';
-}
-
-export function analyzeTradingData(token: Token): TradingAnalysis {
-  const liqRatio = token.mcap > 0 ? token.liquidity / token.mcap : 0;
-  
-  // Liquidity health
-  let liqHealth: 'healthy' | 'warning' | 'danger' = 'warning';
-  if (liqRatio > 0.15) liqHealth = 'healthy';
-  else if (liqRatio < 0.05) liqHealth = 'danger';
-  
-  // Risk level
-  let riskScore = 0;
-  if (liqRatio < 0.05) riskScore += 3;
-  else if (liqRatio < 0.1) riskScore += 1;
-  if (token.holders < 30) riskScore += 2;
-  else if (token.holders < 100) riskScore += 1;
-  if (token.priceChange24h < -30) riskScore += 2;
-  
-  let riskLevel: 'low' | 'medium' | 'high' | 'extreme' = 'medium';
-  if (riskScore <= 1) riskLevel = 'low';
-  else if (riskScore <= 3) riskLevel = 'medium';
-  else if (riskScore <= 5) riskLevel = 'high';
-  else riskLevel = 'extreme';
-  
-  // Trend
-  let trend: 'bullish' | 'bearish' | 'neutral' = 'neutral';
-  if (token.priceChange24h > 10) trend = 'bullish';
-  else if (token.priceChange24h < -10) trend = 'bearish';
-  
-  // Momentum
-  let momentum: 'strong' | 'moderate' | 'weak' = 'moderate';
-  if (Math.abs(token.priceChange24h) > 30) momentum = 'strong';
-  else if (Math.abs(token.priceChange24h) < 5) momentum = 'weak';
-  
-  // Volume profile
-  const totalTrades = (token.buyCount24h || 0) + (token.sellCount24h || 0);
-  let volumeProfile: 'high' | 'medium' | 'low' = 'medium';
-  if (totalTrades > 100) volumeProfile = 'high';
-  else if (totalTrades < 20) volumeProfile = 'low';
-  
-  // Buy pressure
-  const buys = token.buyCount24h || 1;
-  const sells = token.sellCount24h || 1;
-  const buyPressure = buys / sells;
-  
-  // Bonding status
-  let bondingStatus: 'bonding' | 'graduated' | 'unknown' = 'unknown';
-  if (token.bondingProgress !== undefined) {
-    bondingStatus = token.bondingProgress >= 100 ? 'graduated' : 'bonding';
-  }
-  
-  return {
-    liqRatio,
-    liqHealth,
-    riskLevel,
-    trend,
-    momentum,
-    volumeProfile,
-    buyPressure,
-    bondingStatus,
-  };
-}
-
-// ============================================================
-// MARKET DATA (via API)
+// MARKET DATA — WITH CACHE
 // ============================================================
 
 export interface MarketInfo {
@@ -268,11 +259,21 @@ export interface MarketInfo {
 }
 
 export async function getMarketData(tokenAddress: string): Promise<MarketInfo | null> {
-  const data = await apiGet<{ market_info: any }>(`/agent/market/${tokenAddress}`);
-  if (!data?.market_info) return null;
+  // Check cache first
+  const cached = getCached(cache.market, tokenAddress);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const data = await rateLimitedFetch<{ market_info: any }>(`${CONFIG.apiUrl}/agent/market/${tokenAddress}`);
+  
+  if (!data?.market_info) {
+    setCache(cache.market, tokenAddress, null);
+    return null;
+  }
 
   const m = data.market_info;
-  return {
+  const result: MarketInfo = {
     price: parseFloat(m.price || '0'),
     priceUsd: parseFloat(m.price_usd || '0'),
     mcap: parseFloat(m.market_cap || '0'),
@@ -282,10 +283,27 @@ export async function getMarketData(tokenAddress: string): Promise<MarketInfo | 
     isGraduated: m.market_type === 'DEX',
     athPrice: parseFloat(m.ath_price || '0'),
   };
+  
+  setCache(cache.market, tokenAddress, result);
+  return result;
 }
 
 // ============================================================
-// SWAP HISTORY (via API)
+// TOKEN PRICE — WITH CACHE
+// ============================================================
+
+export async function getTokenPrice(tokenAddress: string): Promise<number | null> {
+  const cached = getCached(cache.price, tokenAddress);
+  if (cached !== undefined) return cached;
+
+  const marketData = await getMarketData(tokenAddress);
+  const price = marketData?.price || null;
+  setCache(cache.price, tokenAddress, price);
+  return price;
+}
+
+// ============================================================
+// SWAP HISTORY — WITH CACHE
 // ============================================================
 
 export interface SwapInfo {
@@ -302,13 +320,20 @@ export async function getSwapHistory(
   limit: number = 20,
   tradeType: 'BUY' | 'SELL' | 'ALL' = 'ALL'
 ): Promise<SwapInfo[]> {
-  const data = await apiGet<{ swaps: any[]; total_count: number }>(
-    `/agent/swap-history/${tokenAddress}?limit=${limit}&trade_type=${tradeType}`
+  const cacheKey = `${tokenAddress}-${limit}-${tradeType}`;
+  const cached = getCached(cache.swaps, cacheKey);
+  if (cached !== undefined) return cached;
+
+  const data = await rateLimitedFetch<{ swaps: any[] }>(
+    `${CONFIG.apiUrl}/agent/swap-history/${tokenAddress}?limit=${limit}&trade_type=${tradeType}`
   );
 
-  if (!data?.swaps) return [];
+  if (!data?.swaps) {
+    setCache(cache.swaps, cacheKey, []);
+    return [];
+  }
 
-  return data.swaps.map((s: any) => ({
+  const result = data.swaps.map((s: any) => ({
     eventType: s.swap_info?.event_type || 'BUY',
     nativeAmount: s.swap_info?.native_amount || '0',
     tokenAmount: s.swap_info?.token_amount || '0',
@@ -316,145 +341,46 @@ export async function getSwapHistory(
     sender: s.swap_info?.sender || '',
     timestamp: s.swap_info?.timestamp || 0,
   }));
+  
+  setCache(cache.swaps, cacheKey, result);
+  return result;
 }
 
 // ============================================================
-// ENRICH TOKEN — Fetch additional data from API
+// CALCULATE RISK SCORE
 // ============================================================
 
-export async function enrichTokenData(token: Token): Promise<Token> {
-  try {
-    const [marketData, swapHistory] = await Promise.all([
-      getMarketData(token.address),
-      getSwapHistory(token.address, 50),
-    ]);
-    
-    if (marketData) {
-      token.athPrice = marketData.athPrice;
-      token.volume24h = marketData.volume24h;
-      // Update with fresh data
-      if (marketData.mcap > 0) token.mcap = marketData.mcap;
-      if (marketData.liquidity > 0) token.liquidity = marketData.liquidity;
-      if (marketData.holders > 0) token.holders = marketData.holders;
-    }
-    
-    if (swapHistory.length > 0) {
-      token.buyCount24h = swapHistory.filter(s => s.eventType === 'BUY').length;
-      token.sellCount24h = swapHistory.filter(s => s.eventType === 'SELL').length;
-    }
-    
-    return token;
-  } catch (error) {
-    console.error('Error enriching token:', error);
-    return token;
-  }
-}
-
-// ============================================================
-// GET TOKEN INFO (via API)
-// ============================================================
-
-export async function getTokenInfo(tokenAddress: string): Promise<Token | null> {
-  try {
-    const [tokenData, marketData] = await Promise.all([
-      apiGet<{ token_info: any }>(`/agent/token/${tokenAddress}`),
-      getMarketData(tokenAddress),
-    ]);
-
-    if (!tokenData?.token_info) return null;
-
-    const t = tokenData.token_info;
-    return {
-      address: tokenAddress,
-      symbol: t.symbol || 'UNKNOWN',
-      name: t.name || 'Unknown',
-      price: marketData?.priceUsd || 0,
-      priceChange24h: 0,
-      mcap: marketData?.mcap || 0,
-      liquidity: marketData?.liquidity || 0,
-      holders: marketData?.holders || 0,
-      deployer: t.creator || '',
-      createdAt: new Date(t.created_at || Date.now()),
-    };
-  } catch (error) {
-    console.error('Error getting token info:', error);
-    return null;
-  }
-}
-
-// ============================================================
-// CHART DATA (OHLCV via API)
-// ============================================================
-
-export interface OHLCV {
-  t: number[];  // timestamps
-  o: number[];  // open
-  h: number[];  // high
-  l: number[];  // low
-  c: number[];  // close
-  v: number[];  // volume
-  s: string;    // status
-}
-
-export async function getChartData(
-  tokenAddress: string,
-  resolution: '1' | '5' | '15' | '30' | '60' | '240' | '1D' = '60',
-  from?: number,
-  to?: number
-): Promise<OHLCV | null> {
-  const now = Math.floor(Date.now() / 1000);
-  const fromTs = from || now - 86400; // Default: last 24h
-  const toTs = to || now;
-
-  return apiGet<OHLCV>(
-    `/agent/chart/${tokenAddress}?resolution=${resolution}&from=${fromTs}&to=${toTs}`
-  );
-}
-
-// ============================================================
-// CALCULATE RISK SCORE (via API data)
-// ============================================================
-
-export async function calculateRiskScore(token: Token): Promise<{
-  score: number;
-  flags: string[];
-}> {
+export async function calculateRiskScore(token: Token): Promise<{ score: number; flags: string[] }> {
   const flags: string[] = [];
-  let score = 50; // Start neutral
+  let score = 50;
 
   try {
-    // Get additional data from API
-    const [marketData, swapHistory] = await Promise.all([
-      getMarketData(token.address),
-      getSwapHistory(token.address, 50),
-    ]);
+    const marketData = await getMarketData(token.address);
+    const swapHistory = await getSwapHistory(token.address, 50);
 
-    // Check liquidity ratio
     if (marketData) {
       const liqRatio = marketData.liquidity / (marketData.mcap || 1);
       if (liqRatio < 0.05) {
-        flags.push('Very low liquidity ratio');
+        flags.push('Very low liquidity');
         score += 20;
       } else if (liqRatio < 0.15) {
-        flags.push('Low liquidity ratio');
+        flags.push('Low liquidity');
         score += 10;
       } else if (liqRatio > 0.3) {
-        score -= 10; // Good liquidity
+        score -= 10;
       }
     }
 
-    // Check holder count
     if (token.holders < 10) {
-      flags.push(`Very few holders (${token.holders})`);
+      flags.push(`Only ${token.holders} holders`);
       score += 25;
     } else if (token.holders < 50) {
-      flags.push(`Only ${token.holders} holders`);
+      flags.push(`${token.holders} holders`);
       score += 15;
     } else if (token.holders > 500) {
-      score -= 10; // Good distribution
+      score -= 10;
     }
 
-    // Check swap history for suspicious patterns
     if (swapHistory.length > 0) {
       const buyCount = swapHistory.filter(s => s.eventType === 'BUY').length;
       const sellCount = swapHistory.filter(s => s.eventType === 'SELL').length;
@@ -463,216 +389,45 @@ export async function calculateRiskScore(token: Token): Promise<{
         flags.push('High sell pressure');
         score += 15;
       }
-      
-      // Check for whale activity
-      const largeTrades = swapHistory.filter(s => {
-        const amount = parseFloat(s.nativeAmount);
-        return amount > 10; // > 10 MON
-      });
-      if (largeTrades.length > swapHistory.length * 0.3) {
-        flags.push('Whale activity detected');
-        score += 10;
-      }
     }
 
-    // Check token age
     const ageHours = (Date.now() - token.createdAt.getTime()) / (1000 * 60 * 60);
     if (ageHours < 1) {
-      flags.push('Very new token (<1h)');
+      flags.push('Very new (<1h)');
       score += 15;
     } else if (ageHours < 6) {
-      flags.push('New token (<6h)');
+      flags.push('New (<6h)');
       score += 10;
-    } else if (ageHours < 24) {
-      flags.push('Recent token (<24h)');
-      score += 5;
     }
 
-    // Check price change
     if (token.priceChange24h < -50) {
-      flags.push('Major price dump (-50%+)');
+      flags.push('Major dump');
       score += 20;
     } else if (token.priceChange24h < -30) {
-      flags.push('Significant price drop');
+      flags.push('Significant drop');
       score += 10;
     }
 
   } catch (error) {
-    console.error('Error calculating risk score:', error);
-    flags.push('Unable to fetch complete data');
+    console.error('Risk calc error:', error);
+    flags.push('Data incomplete');
     score += 10;
   }
 
-  // Clamp score between 0-100
-  score = Math.max(0, Math.min(100, score));
-
-  return { score, flags };
+  return { score: Math.max(0, Math.min(100, score)), flags };
 }
 
 // ============================================================
-// TECHNICAL ANALYSIS
-// ============================================================
-
-export interface TechnicalIndicators {
-  rsi: number;                    // 0-100
-  rsiSignal: 'oversold' | 'neutral' | 'overbought';
-  sma20: number;
-  sma50: number;
-  priceVsSma20: number;           // % above/below
-  trend: 'uptrend' | 'downtrend' | 'sideways';
-  support: number;
-  resistance: number;
-  volumeTrend: 'increasing' | 'decreasing' | 'stable';
-  pattern: string;                // "breakout", "consolidation", "dump", etc.
-  momentum: 'strong_bull' | 'weak_bull' | 'neutral' | 'weak_bear' | 'strong_bear';
-}
-
-export async function getTechnicalAnalysis(tokenAddress: string): Promise<TechnicalIndicators | null> {
-  // Fetch 1h candles for last 24h
-  const chartData = await getChartData(tokenAddress, '60');
-  if (!chartData || chartData.c.length < 10) return null;
-  
-  const closes = chartData.c;
-  const volumes = chartData.v;
-  const highs = chartData.h;
-  const lows = chartData.l;
-  
-  // Calculate RSI (14 periods)
-  const rsi = calculateRSI(closes, 14);
-  
-  // Calculate SMAs
-  const sma20 = calculateSMA(closes, Math.min(20, closes.length));
-  const sma50 = calculateSMA(closes, Math.min(50, closes.length));
-  
-  const currentPrice = closes[closes.length - 1];
-  const priceVsSma20 = ((currentPrice - sma20) / sma20) * 100;
-  
-  // Determine trend
-  let trend: 'uptrend' | 'downtrend' | 'sideways' = 'sideways';
-  if (currentPrice > sma20 && sma20 > sma50) trend = 'uptrend';
-  else if (currentPrice < sma20 && sma20 < sma50) trend = 'downtrend';
-  
-  // Find support/resistance
-  const support = Math.min(...lows.slice(-10));
-  const resistance = Math.max(...highs.slice(-10));
-  
-  // Volume trend
-  const recentVol = volumes.slice(-5).reduce((a, b) => a + b, 0) / 5;
-  const olderVol = volumes.slice(-10, -5).reduce((a, b) => a + b, 0) / 5;
-  let volumeTrend: 'increasing' | 'decreasing' | 'stable' = 'stable';
-  if (recentVol > olderVol * 1.3) volumeTrend = 'increasing';
-  else if (recentVol < olderVol * 0.7) volumeTrend = 'decreasing';
-  
-  // Detect pattern
-  const pattern = detectPattern(closes, highs, lows, volumes);
-  
-  // Momentum
-  const momentum = getMomentum(rsi, trend, priceVsSma20);
-  
-  return {
-    rsi,
-    rsiSignal: rsi < 30 ? 'oversold' : rsi > 70 ? 'overbought' : 'neutral',
-    sma20,
-    sma50,
-    priceVsSma20,
-    trend,
-    support,
-    resistance,
-    volumeTrend,
-    pattern,
-    momentum,
-  };
-}
-
-function calculateRSI(closes: number[], period: number): number {
-  if (closes.length < period + 1) return 50;
-  
-  let gains = 0;
-  let losses = 0;
-  
-  for (let i = closes.length - period; i < closes.length; i++) {
-    const change = closes[i] - closes[i - 1];
-    if (change > 0) gains += change;
-    else losses -= change;
-  }
-  
-  const avgGain = gains / period;
-  const avgLoss = losses / period;
-  
-  if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - (100 / (1 + rs));
-}
-
-function calculateSMA(data: number[], period: number): number {
-  const slice = data.slice(-period);
-  return slice.reduce((a, b) => a + b, 0) / slice.length;
-}
-
-function detectPattern(closes: number[], highs: number[], lows: number[], volumes: number[]): string {
-  const len = closes.length;
-  if (len < 5) return 'insufficient_data';
-  
-  const recent = closes.slice(-5);
-  const recentHigh = Math.max(...recent);
-  const recentLow = Math.min(...recent);
-  const range = (recentHigh - recentLow) / recentLow * 100;
-  
-  const currentPrice = closes[len - 1];
-  const priceChange = (currentPrice - closes[len - 5]) / closes[len - 5] * 100;
-  
-  const recentVol = volumes.slice(-3).reduce((a, b) => a + b, 0);
-  const olderVol = volumes.slice(-6, -3).reduce((a, b) => a + b, 0);
-  const volSpike = recentVol > olderVol * 2;
-  
-  // Detect patterns
-  if (priceChange > 30 && volSpike) return 'pump';
-  if (priceChange < -30 && volSpike) return 'dump';
-  if (range < 5) return 'consolidation';
-  if (currentPrice >= recentHigh * 0.98 && volSpike) return 'breakout';
-  if (currentPrice <= recentLow * 1.02 && volSpike) return 'breakdown';
-  if (priceChange > 10) return 'rally';
-  if (priceChange < -10) return 'selloff';
-  
-  return 'ranging';
-}
-
-function getMomentum(rsi: number, trend: string, priceVsSma: number): string {
-  if (rsi > 70 && trend === 'uptrend' && priceVsSma > 10) return 'strong_bull';
-  if (rsi > 50 && trend === 'uptrend') return 'weak_bull';
-  if (rsi < 30 && trend === 'downtrend' && priceVsSma < -10) return 'strong_bear';
-  if (rsi < 50 && trend === 'downtrend') return 'weak_bear';
-  return 'neutral';
-}
-
-// ============================================================
-// NEW TOKENS (via API)
+// NEW TOKENS
 // ============================================================
 
 export async function getNewTokens(limit: number = 10): Promise<Token[]> {
   try {
-    console.log(`🔍 Fetching new tokens from nad.fun API...`);
+    const data = await rateLimitedFetch<{ tokens: any[] }>(
+      `${CONFIG.apiUrl}/order/market_cap?page=1&limit=${limit}&direction=DESC&is_nsfw=false`
+    );
     
-    const url = `${CONFIG.apiUrl}/order/market_cap?page=1&limit=${limit}&direction=DESC&is_nsfw=false`;
-    console.log(`📡 GET ${url}`);
-
-    
-    const res = await fetch(url, { headers });
-
-    
-    if (!res.ok) {
-      console.error(`API error: ${res.status}`);
-      return [];
-    }
-    
-    const data = await res.json();
-        console.log("data",data.tokens[0]);
-    if (!data?.tokens || data.tokens.length === 0) {
-      console.log('📭 No tokens returned from API');
-      return [];
-    }
-    
-    console.log(`📊 Found ${data.tokens.length} tokens`);
+    if (!data?.tokens) return [];
     
     const tokens: Token[] = [];
     
@@ -691,19 +446,15 @@ export async function getNewTokens(limit: number = 10): Promise<Token[]> {
       const nativePrice = parseFloat(m?.native_price || '0');
       const liquidity = reserveNative * nativePrice * 2;
       
-      const holders = m?.holder_count || 0;
-      
-      console.log(`✅ $${t.symbol} - MCap: $${(mcap/1000).toFixed(1)}K, Holders: ${holders}`);
-      
       tokens.push({
         address,
         symbol: t.symbol || 'UNKNOWN',
-        name: t.name || 'Unknown Token',
+        name: t.name || 'Unknown',
         price: priceUsd,
         priceChange24h: item.percent || 0,
         mcap,
         liquidity,
-        holders,
+        holders: m?.holder_count || 0,
         deployer: t.creator?.account_id || '',
         createdAt: new Date((t.created_at || 0) * 1000),
       });
@@ -711,16 +462,15 @@ export async function getNewTokens(limit: number = 10): Promise<Token[]> {
       if (tokens.length >= limit) break;
     }
     
-    console.log(`🎯 Returning ${tokens.length} tokens`);
     return tokens;
   } catch (error) {
-    console.error('Error fetching new tokens:', error);
+    console.error('Error fetching tokens:', error);
     return [];
   }
 }
 
 // ============================================================
-// QUOTE (on-chain)
+// TRADING FUNCTIONS
 // ============================================================
 
 export async function getQuote(
@@ -735,20 +485,12 @@ export async function getQuote(
       functionName: 'getAmountOut',
       args: [tokenAddress, amountIn, isBuy],
     });
-
-    return {
-      router: result[0] as `0x${string}`,
-      amountOut: result[1],
-    };
+    return { router: result[0] as `0x${string}`, amountOut: result[1] };
   } catch (error) {
-    console.error('Error getting quote:', error);
+    console.error('Quote error:', error);
     return null;
   }
 }
-
-// ============================================================
-// BUY TOKEN
-// ============================================================
 
 export async function buyToken(
   walletClient: WalletClient,
@@ -762,7 +504,7 @@ export async function buyToken(
 
     const amountIn = parseEther(amountMON);
     const quote = await getQuote(tokenAddress, amountIn, true);
-    if (!quote) throw new Error('Failed to get quote');
+    if (!quote) throw new Error('No quote');
 
     const amountOutMin = (quote.amountOut * (10000n - slippageBps)) / 10000n;
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
@@ -770,12 +512,7 @@ export async function buyToken(
     const callData = encodeFunctionData({
       abi: routerAbi,
       functionName: 'buy',
-      args: [{
-        amountOutMin,
-        token: tokenAddress,
-        to: account.address,
-        deadline,
-      }],
+      args: [{ amountOutMin, token: tokenAddress, to: account.address, deadline }],
     });
 
     const hash = await walletClient.sendTransaction({
@@ -787,21 +524,14 @@ export async function buyToken(
     });
 
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
-
-    if (receipt.status === 'reverted') {
-      throw new Error('Transaction reverted');
-    }
+    if (receipt.status === 'reverted') throw new Error('Reverted');
 
     return { txHash: hash, amountOut: quote.amountOut };
   } catch (error) {
-    console.error('Error buying token:', error);
+    console.error('Buy error:', error);
     return null;
   }
 }
-
-// ============================================================
-// SELL TOKEN
-// ============================================================
 
 export async function sellToken(
   walletClient: WalletClient,
@@ -814,7 +544,7 @@ export async function sellToken(
     if (!account) throw new Error('No account');
 
     const quote = await getQuote(tokenAddress, amountTokens, false);
-    if (!quote) throw new Error('Failed to get quote');
+    if (!quote) throw new Error('No quote');
 
     const allowance = await publicClient.readContract({
       address: tokenAddress,
@@ -841,13 +571,7 @@ export async function sellToken(
     const callData = encodeFunctionData({
       abi: routerAbi,
       functionName: 'sell',
-      args: [{
-        amountIn: amountTokens,
-        amountOutMin,
-        token: tokenAddress,
-        to: account.address,
-        deadline,
-      }],
+      args: [{ amountIn: amountTokens, amountOutMin, token: tokenAddress, to: account.address, deadline }],
     });
 
     const hash = await walletClient.sendTransaction({
@@ -858,14 +582,11 @@ export async function sellToken(
     });
 
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
-
-    if (receipt.status === 'reverted') {
-      throw new Error('Transaction reverted');
-    }
+    if (receipt.status === 'reverted') throw new Error('Reverted');
 
     return { txHash: hash, amountOut: quote.amountOut };
   } catch (error) {
-    console.error('Error selling token:', error);
+    console.error('Sell error:', error);
     return null;
   }
 }
@@ -876,22 +597,14 @@ export async function sellToken(
 
 export function createBotWalletClient(privateKey: `0x${string}`): WalletClient {
   const account = privateKeyToAccount(privateKey);
-  return createWalletClient({
-    account,
-    chain,
-    transport: http(CONFIG.rpcUrl),
-  });
+  return createWalletClient({ account, chain, transport: http(CONFIG.rpcUrl) });
 }
 
 export async function getWalletBalance(address: `0x${string}`): Promise<bigint> {
-  console.log("address",address);
   return publicClient.getBalance({ address });
 }
 
-export async function getTokenBalance(
-  tokenAddress: `0x${string}`,
-  walletAddress: `0x${string}`
-): Promise<bigint> {
+export async function getTokenBalance(tokenAddress: `0x${string}`, walletAddress: `0x${string}`): Promise<bigint> {
   return publicClient.readContract({
     address: tokenAddress,
     abi: erc20Abi,
@@ -900,26 +613,8 @@ export async function getTokenBalance(
   });
 }
 
-// ============================================================
-// GET TOKEN PRICE
-// ============================================================
-
-export async function getTokenPrice(tokenAddress: string): Promise<number | null> {
-  try {
-    const marketData = await getMarketData(tokenAddress);
-    if (marketData && marketData.price) {
-      return marketData.price;
-    }
-    
-    // Fallback: try getTokenInfo
-    const tokenInfo = await getTokenInfo(tokenAddress);
-    if (tokenInfo && tokenInfo.price) {
-      return tokenInfo.price;
-    }
-    
-    return null;
-  } catch (error) {
-    console.error('Error getting token price:', error);
-    return null;
-  }
+export function clearCache(): void {
+  cache.market.clear();
+  cache.swaps.clear();
+  cache.price.clear();
 }

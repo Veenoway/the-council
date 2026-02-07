@@ -1,10 +1,10 @@
 // ============================================================
-// ORCHESTRATOR — Real conversations, real debates, real decisions
+// ORCHESTRATOR v8 — Opinions based on REAL TA + fundamentals
 // ============================================================
 
 import type { BotId, Token, Message } from '../types/index.js';
 import { ALL_BOT_IDS, getBotConfig } from '../bots/personalities.js';
-import { getNewTokens, calculateRiskScore, getMarketData, getSwapHistory } from './nadfun.js';
+import { getNewTokens, calculateRiskScore } from './nadfun.js';
 import { executeBotTrade, calculateTradeSize, getBotBalance } from './trading.js';
 import { broadcastMessage, broadcastNewToken, broadcastVerdict, onInternalEvent } from './websocket.js';
 import { createPosition, saveMessage, saveToken } from '../db/index.js';
@@ -20,82 +20,76 @@ const grok = new OpenAI({
 });
 
 // ============================================================
+// BOT CONFIGS — What each bot cares about for their opinion
+// ============================================================
+
+const BOTS: Record<BotId, {
+  name: string;
+  style: string;
+  // What this bot weighs for their opinion
+  weights: {
+    holders: number;      // Community size importance (0-1)
+    ta: number;           // Technical analysis importance (0-1)
+    lp: number;           // Liquidity importance (0-1)
+    momentum: number;     // Volume/momentum importance (0-1)
+  };
+  bullishThreshold: number;  // Score needed to be bullish (0-100)
+  bearishThreshold: number;  // Score below which they're bearish (0-100)
+}> = {
+  chad: {
+    name: 'James',
+    style: 'casual degen, uses fr/ngl/ser/lfg sparingly, emojis 🔥💀',
+    weights: { holders: 0.35, ta: 0.15, lp: 0.10, momentum: 0.40 },
+    bullishThreshold: 50,  // Easy to convince
+    bearishThreshold: 30,
+  },
+  quantum: {
+    name: 'Keone', 
+    style: 'analytical, cites specific numbers, measured',
+    weights: { holders: 0.20, ta: 0.45, lp: 0.15, momentum: 0.20 },
+    bullishThreshold: 55,
+    bearishThreshold: 40,
+  },
+  sensei: {
+    name: 'Portdev',
+    style: 'chill, occasional Japanese (sugoi, yabai), anime refs',
+    weights: { holders: 0.45, ta: 0.15, lp: 0.10, momentum: 0.30 },
+    bullishThreshold: 50,
+    bearishThreshold: 30,
+  },
+  sterling: {
+    name: 'Harpal',
+    style: 'formal, dry humor, risk-focused',
+    weights: { holders: 0.25, ta: 0.25, lp: 0.35, momentum: 0.15 },
+    bullishThreshold: 60,  // Harder to convince
+    bearishThreshold: 45,
+  },
+  oracle: {
+    name: 'Mike',
+    style: 'cryptic, short, mysterious, 👁️',
+    weights: { holders: 0.30, ta: 0.30, lp: 0.15, momentum: 0.25 },
+    bullishThreshold: 55,
+    bearishThreshold: 40,
+  },
+};
+
+// ============================================================
 // STATE
 // ============================================================
 
 let currentToken: Token | null = null;
 let isAnalyzing = false;
 let lastTokenScan = 0;
-const TOKEN_SCAN_INTERVAL = 60_000;
+const TOKEN_SCAN_INTERVAL = 120_000;
 const seenTokens = new Set<string>();
-const recentMessages = new Set<string>(); // Anti-duplicate
-
-// ============================================================
-// BOT PERSONALITIES — Core beliefs that drive analysis
-// ============================================================
-
-const BOT_PERSPECTIVES: Record<BotId, {
-  name: string;
-  role: string;
-  style: string;
-  focusAreas: string[];
-  biases: string[];
-  persuadedBy: string[];
-  skepticalOf: string[];
-}> = {
-  chad: {
-    name: 'James',
-    role: 'momentum trader',
-    style: 'degen energy, uses "fr", "ngl", "lfg", "ser", "bussin", emoji: 💀😭🔥',
-    focusAreas: ['price action', 'volume', 'momentum', 'hype'],
-    biases: ['loves pumps', 'FOMO prone', 'optimistic', 'action-oriented'],
-    persuadedBy: ['volume spikes', 'price momentum', 'social buzz', 'other degens buying'],
-    skepticalOf: ['too much caution', 'waiting too long', 'missing opportunities'],
-  },
-  quantum: {
-    name: 'Keone',
-    role: 'quantitative analyst',
-    style: 'data-driven, mentions numbers/percentages, slightly pedantic, precise',
-    focusAreas: ['LP ratio', 'holder distribution', 'volume patterns', 'statistical probability'],
-    biases: ['trusts only data', 'risk-adjusted thinking', 'historical patterns'],
-    persuadedBy: ['solid numbers', 'good LP ratio', 'healthy holder distribution', 'statistical evidence'],
-    skepticalOf: ['vibes', 'hype without data', 'emotional arguments'],
-  },
-  sensei: {
-    name: 'Portdev',
-    role: 'community analyst',
-    style: 'weeb energy, uses Japanese words (sugoi, yabai, nakama), anime references, chill vibes',
-    focusAreas: ['community size', 'social sentiment', 'meme quality', 'holder engagement'],
-    biases: ['believes in community power', 'vibes matter', 'memes have souls'],
-    persuadedBy: ['strong community', 'organic growth', 'passionate holders', 'good meme energy'],
-    skepticalOf: ['dead communities', 'paid shills', 'no social presence'],
-  },
-  sterling: {
-    name: 'Harpal',
-    role: 'risk manager',
-    style: 'formal, dry wit, old school finance, references experience, British formality',
-    focusAreas: ['deployer history', 'contract risks', 'liquidity locks', 'red flags'],
-    biases: ['extremely cautious', 'seen too many rugs', 'preservation of capital'],
-    persuadedBy: ['locked liquidity', 'clean deployer history', 'established tokens', 'low risk scores'],
-    skepticalOf: ['new tokens', 'hype', 'fast pumps', 'anything that seems too good'],
-  },
-  oracle: {
-    name: 'Mike',
-    role: 'pattern seer',
-    style: 'cryptic, mysterious, short sentences, uses 👁️, speaks in riddles',
-    focusAreas: ['whale movements', 'hidden patterns', 'contrarian signals', 'chain analysis'],
-    biases: ['sees what others miss', 'contrarian', 'trusts the chains'],
-    persuadedBy: ['unusual wallet activity', 'hidden accumulation', 'patterns others miss'],
-    skepticalOf: ['obvious plays', 'crowd consensus', 'too much hype'],
-  },
-};
+const recentMessages = new Set<string>();
 
 // ============================================================
 // MAIN LOOP
 // ============================================================
 
 export async function startOrchestrator(): Promise<void> {
-  console.log('🏛️ The Council is now in session');
+  console.log('🏛️ The Council v8 - TA-based opinions');
 
   onInternalEvent('human_message', async (data) => {
     await handleHumanMessage(data);
@@ -123,11 +117,9 @@ async function scanForNewTokens(): Promise<void> {
       if (seenTokens.has(token.address)) continue;
       seenTokens.add(token.address);
 
-      if (token.mcap < 5000) continue;
-      if (token.mcap > 5_000_000) continue;
-      if (token.liquidity < 500) continue;
+      if (token.mcap < 3000 || token.mcap > 10_000_000) continue;
+      if (token.liquidity < 300) continue;
 
-      console.log(`✅ Analyzing $${token.symbol} (mcap: $${(token.mcap / 1000).toFixed(1)}K, holders: ${token.holders})`);
       await analyzeToken(token);
       break;
     }
@@ -137,7 +129,245 @@ async function scanForNewTokens(): Promise<void> {
 }
 
 // ============================================================
-// MAIN ANALYSIS — Real conversation flow
+// SCORE CALCULATIONS — Real TA-based scoring
+// ============================================================
+
+interface TokenScores {
+  // Individual scores (0-100)
+  holdersScore: number;
+  taScore: number;
+  lpScore: number;
+  momentumScore: number;
+  
+  // Derived
+  overall: number;
+  
+  // Human readable
+  holderVerdict: string;
+  taVerdict: string;
+  lpVerdict: string;
+  momentumVerdict: string;
+  
+  // Raw data for prompts
+  data: {
+    holders: number;
+    holdersFormatted: string;
+    mcapK: string;
+    lpRatio: string;
+    rsi: string;
+    rsiSignal: string;
+    macd: string;
+    trend: string;
+    bbPosition: string;
+    bbSqueeze: boolean;
+    volumeRatio: string;
+    volumeSpike: boolean;
+    whales: string;
+    obv: string;
+    patterns: string;
+    signal: string;
+    support: boolean;
+    resistance: boolean;
+    bullishFactors: string[];
+    bearishFactors: string[];
+  };
+}
+
+function calculateScores(token: Token, ta: TechnicalIndicators | null, riskScore: number): TokenScores {
+  // ============ HOLDER SCORE (for Monad) ============
+  let holdersScore = 0;
+  let holderVerdict = '';
+  
+  if (token.holders >= 30000) { holdersScore = 98; holderVerdict = 'exceptional - top tier on Monad'; }
+  else if (token.holders >= 20000) { holdersScore = 95; holderVerdict = 'massive community'; }
+  else if (token.holders >= 10000) { holdersScore = 90; holderVerdict = 'huge for Monad'; }
+  else if (token.holders >= 5000) { holdersScore = 80; holderVerdict = 'very strong community'; }
+  else if (token.holders >= 2000) { holdersScore = 70; holderVerdict = 'solid holder base'; }
+  else if (token.holders >= 1000) { holdersScore = 60; holderVerdict = 'decent community'; }
+  else if (token.holders >= 500) { holdersScore = 50; holderVerdict = 'building momentum'; }
+  else if (token.holders >= 200) { holdersScore = 40; holderVerdict = 'early stage'; }
+  else { holdersScore = 25; holderVerdict = 'very early'; }
+
+  // ============ TA SCORE ============
+  let taScore = 50; // Default neutral
+  let taVerdict = 'neutral signals';
+  
+  if (ta) {
+    let taPoints = 50; // Start neutral
+    
+    // RSI contribution (-15 to +15)
+    if (ta.rsi <= 30) taPoints += 15;  // Oversold = bullish
+    else if (ta.rsi <= 40) taPoints += 10;
+    else if (ta.rsi <= 60) taPoints += 5;  // Neutral-ish is fine
+    else if (ta.rsi <= 70) taPoints += 0;  // Getting warm
+    else if (ta.rsi <= 80) taPoints -= 5;  // Overbought warning
+    else taPoints -= 15;  // Very overbought
+    
+    // MACD contribution (-10 to +15)
+    if (ta.macdCrossover === 'bullish') taPoints += 15;
+    else if (ta.macdCrossover === 'bearish') taPoints -= 10;
+    if (ta.macdHistogram > 0) taPoints += 5;
+    else if (ta.macdHistogram < 0) taPoints -= 5;
+    
+    // Moving averages (-10 to +10)
+    if (ta.priceVsMa === 'above_all') taPoints += 10;
+    else if (ta.priceVsMa === 'below_all') taPoints -= 10;
+    if (ta.maCrossover === 'golden_cross') taPoints += 10;
+    else if (ta.maCrossover === 'death_cross') taPoints -= 10;
+    
+    // Bollinger Bands (-5 to +10)
+    if (ta.bbSqueeze) taPoints += 10;  // Squeeze = potential breakout
+    if (ta.bbPosition === 'below_lower') taPoints += 5;  // Oversold
+    else if (ta.bbPosition === 'above_upper') taPoints -= 5;  // Overbought
+    
+    // Trend (-10 to +15)
+    if (ta.trend === 'strong_uptrend') taPoints += 15;
+    else if (ta.trend === 'uptrend') taPoints += 10;
+    else if (ta.trend === 'sideways') taPoints += 0;
+    else if (ta.trend === 'downtrend') taPoints -= 10;
+    else if (ta.trend === 'strong_downtrend') taPoints -= 15;
+    
+    // Support/Resistance
+    if (ta.nearSupport) taPoints += 5;  // Good entry
+    if (ta.nearResistance) taPoints -= 5;  // Potential rejection
+    
+    // Patterns
+    for (const p of ta.patterns) {
+      if (p.direction === 'bullish') taPoints += (p.confidence / 10);
+      else if (p.direction === 'bearish') taPoints -= (p.confidence / 10);
+    }
+    
+    // Overall signal boost
+    if (ta.signal === 'strong_buy') taPoints += 10;
+    else if (ta.signal === 'buy') taPoints += 5;
+    else if (ta.signal === 'sell') taPoints -= 5;
+    else if (ta.signal === 'strong_sell') taPoints -= 10;
+    
+    taScore = Math.max(0, Math.min(100, taPoints));
+    
+    // Verdict
+    if (taScore >= 75) taVerdict = 'strong bullish signals';
+    else if (taScore >= 60) taVerdict = 'bullish leaning';
+    else if (taScore >= 45) taVerdict = 'neutral/mixed signals';
+    else if (taScore >= 30) taVerdict = 'bearish leaning';
+    else taVerdict = 'strong bearish signals';
+  }
+
+  // ============ LP SCORE ============
+  const lpRatio = token.liquidity / (token.mcap || 1);
+  let lpScore = 0;
+  let lpVerdict = '';
+  
+  if (lpRatio >= 0.20) { lpScore = 90; lpVerdict = 'excellent liquidity'; }
+  else if (lpRatio >= 0.15) { lpScore = 80; lpVerdict = 'very healthy LP'; }
+  else if (lpRatio >= 0.10) { lpScore = 70; lpVerdict = 'good liquidity'; }
+  else if (lpRatio >= 0.08) { lpScore = 60; lpVerdict = 'decent LP'; }
+  else if (lpRatio >= 0.06) { lpScore = 50; lpVerdict = 'acceptable for meme'; }
+  else if (lpRatio >= 0.04) { lpScore = 35; lpVerdict = 'thin liquidity'; }
+  else { lpScore = 20; lpVerdict = 'low LP - careful with size'; }
+
+  // ============ MOMENTUM SCORE ============
+  let momentumScore = 50;
+  let momentumVerdict = 'average activity';
+  
+  if (ta) {
+    let momPoints = 50;
+    
+    // Volume
+    if (ta.volumeSpike) momPoints += 20;
+    else if (ta.volumeRatio > 1.5) momPoints += 10;
+    else if (ta.volumeRatio < 0.5) momPoints -= 10;
+    
+    // Volume trend
+    if (ta.volumeTrend === 'increasing') momPoints += 10;
+    else if (ta.volumeTrend === 'decreasing') momPoints -= 10;
+    
+    // Buy/sell pressure
+    if (ta.buySellRatio > 2) momPoints += 15;
+    else if (ta.buySellRatio > 1.5) momPoints += 10;
+    else if (ta.buySellRatio > 1.2) momPoints += 5;
+    else if (ta.buySellRatio < 0.5) momPoints -= 15;
+    else if (ta.buySellRatio < 0.8) momPoints -= 10;
+    
+    // OBV trend
+    if (ta.obvTrend === 'accumulation') momPoints += 10;
+    else if (ta.obvTrend === 'distribution') momPoints -= 10;
+    
+    // Whale activity
+    if (ta.whaleActivity === 'buying') momPoints += 10;
+    else if (ta.whaleActivity === 'selling') momPoints -= 15;
+    
+    momentumScore = Math.max(0, Math.min(100, momPoints));
+    
+    if (momentumScore >= 75) momentumVerdict = 'strong buying momentum';
+    else if (momentumScore >= 60) momentumVerdict = 'positive momentum';
+    else if (momentumScore >= 45) momentumVerdict = 'neutral momentum';
+    else if (momentumScore >= 30) momentumVerdict = 'weak momentum';
+    else momentumVerdict = 'negative momentum';
+  }
+
+  // ============ OVERALL (simple average for display) ============
+  const overall = (holdersScore + taScore + lpScore + momentumScore) / 4;
+
+  // ============ BUILD DATA OBJECT ============
+  const data = {
+    holders: token.holders,
+    holdersFormatted: token.holders.toLocaleString(),
+    mcapK: (token.mcap / 1000).toFixed(0),
+    lpRatio: (lpRatio * 100).toFixed(1),
+    rsi: ta?.rsi?.toFixed(0) || 'N/A',
+    rsiSignal: ta?.rsiSignal || 'unknown',
+    macd: ta?.macdCrossover || 'none',
+    trend: ta?.trend?.replace(/_/g, ' ') || 'unknown',
+    bbPosition: ta?.bbPosition?.replace(/_/g, ' ') || 'middle',
+    bbSqueeze: ta?.bbSqueeze || false,
+    volumeRatio: ta?.volumeRatio?.toFixed(1) || '1.0',
+    volumeSpike: ta?.volumeSpike || false,
+    whales: ta?.whaleActivity || 'none',
+    obv: ta?.obvTrend || 'neutral',
+    patterns: ta?.patterns?.map(p => p.name).join(', ') || 'none',
+    signal: ta?.signal?.replace(/_/g, ' ') || 'hold',
+    support: ta?.nearSupport || false,
+    resistance: ta?.nearResistance || false,
+    bullishFactors: ta?.bullishFactors || [],
+    bearishFactors: ta?.bearishFactors || [],
+  };
+
+  return {
+    holdersScore,
+    taScore,
+    lpScore,
+    momentumScore,
+    overall,
+    holderVerdict,
+    taVerdict,
+    lpVerdict,
+    momentumVerdict,
+    data,
+  };
+}
+
+// ============================================================
+// BOT OPINION CALCULATOR — Based on their weights
+// ============================================================
+
+function calculateBotOpinion(botId: BotId, scores: TokenScores): 'bullish' | 'bearish' | 'neutral' {
+  const bot = BOTS[botId];
+  
+  // Calculate weighted score for this bot
+  const weightedScore = 
+    (scores.holdersScore * bot.weights.holders) +
+    (scores.taScore * bot.weights.ta) +
+    (scores.lpScore * bot.weights.lp) +
+    (scores.momentumScore * bot.weights.momentum);
+  
+  if (weightedScore >= bot.bullishThreshold) return 'bullish';
+  if (weightedScore < bot.bearishThreshold) return 'bearish';
+  return 'neutral';
+}
+
+// ============================================================
+// MAIN ANALYSIS
 // ============================================================
 
 async function analyzeToken(token: Token): Promise<void> {
@@ -147,212 +377,305 @@ async function analyzeToken(token: Token): Promise<void> {
   setCurrentTokenInBus(token);
   recentMessages.clear();
 
-  // Track evolving opinions (can change during debate!)
-  const currentOpinions: Record<BotId, 'bullish' | 'bearish' | 'neutral'> = {
-    chad: 'neutral',
-    quantum: 'neutral',
-    sensei: 'neutral',
-    sterling: 'neutral',
-    oracle: 'neutral',
-  };
-
-  const conversationHistory: Array<{ bot: BotId; msg: string; sentiment?: string }> = [];
+  const chat: string[] = [];
 
   try {
     broadcastNewToken(token);
 
-    // =========================================================
-    // PHASE 1: Data gathering
-    // =========================================================
-    
+    await sleep(500);
     const ta = await analyzeTechnicals(token.address);
+    await sleep(1000);
     const { score: riskScore, flags } = await calculateRiskScore(token);
-    const marketData = await getMarketData(token.address);
-    const swapHistory = await getSwapHistory(token.address, 30);
+    
+    // Calculate all scores
+    const scores = calculateScores(token, ta, riskScore);
+    
+    // Pre-calculate opinions based on data (can be influenced by debate)
+    const opinions: Record<BotId, 'bullish' | 'bearish' | 'neutral'> = {
+      chad: calculateBotOpinion('chad', scores),
+      quantum: calculateBotOpinion('quantum', scores),
+      sensei: calculateBotOpinion('sensei', scores),
+      sterling: calculateBotOpinion('sterling', scores),
+      oracle: calculateBotOpinion('oracle', scores),
+    };
 
-    // Build comprehensive data context
-    const dataContext = buildDataContext(token, ta, riskScore, flags, marketData, swapHistory);
-
-    // =========================================================
-    // PHASE 2: Chad spots the token
-    // =========================================================
-
-    await say('chad', `yo new token just dropped - $${token.symbol}, ${(token.mcap / 1000).toFixed(1)}k mcap, ${token.holders} holders. thoughts?`);
-    conversationHistory.push({ bot: 'chad', msg: 'spotted token, asking for thoughts' });
-    await sleep(2000);
-
-    // =========================================================
-    // PHASE 3: Each bot does their analysis (async-ish feel)
-    // =========================================================
-
-    // Quantum analyzes data first
-    const quantumAnalysis = await generateAnalysis('quantum', dataContext, conversationHistory);
-    await say('quantum', quantumAnalysis.message);
-    currentOpinions['quantum'] = quantumAnalysis.sentiment;
-    conversationHistory.push({ bot: 'quantum', msg: quantumAnalysis.message, sentiment: quantumAnalysis.sentiment });
-    await sleep(2500);
-
-    // Sensei checks community
-    const senseiAnalysis = await generateAnalysis('sensei', dataContext, conversationHistory);
-    await say('sensei', senseiAnalysis.message);
-    currentOpinions['sensei'] = senseiAnalysis.sentiment;
-    conversationHistory.push({ bot: 'sensei', msg: senseiAnalysis.message, sentiment: senseiAnalysis.sentiment });
-    await sleep(2500);
-
-    // Sterling checks risks
-    const sterlingAnalysis = await generateAnalysis('sterling', dataContext, conversationHistory);
-    await say('sterling', sterlingAnalysis.message);
-    currentOpinions['sterling'] = sterlingAnalysis.sentiment;
-    conversationHistory.push({ bot: 'sterling', msg: sterlingAnalysis.message, sentiment: sterlingAnalysis.sentiment });
-    await sleep(2500);
-
-    // Oracle sees patterns
-    const oracleAnalysis = await generateAnalysis('oracle', dataContext, conversationHistory);
-    await say('oracle', oracleAnalysis.message);
-    currentOpinions['oracle'] = oracleAnalysis.sentiment;
-    conversationHistory.push({ bot: 'oracle', msg: oracleAnalysis.message, sentiment: oracleAnalysis.sentiment });
-    await sleep(2500);
-
-    // Chad reacts to everyone
-    const chadAnalysis = await generateAnalysis('chad', dataContext, conversationHistory);
-    await say('chad', chadAnalysis.message);
-    currentOpinions['chad'] = chadAnalysis.sentiment;
-    conversationHistory.push({ bot: 'chad', msg: chadAnalysis.message, sentiment: chadAnalysis.sentiment });
-    await sleep(2000);
+    const d = scores.data;
 
     // =========================================================
-    // PHASE 4: DEBATE — This is where opinions can change!
+    // PHASE 1: James alerts
     // =========================================================
 
-    await systemMsg(`💬 Council debate begins...`);
-    await sleep(1500);
+    const jamesOpinion = opinions.chad;
+    const msg1 = await generate('chad', `
+Alert: $${token.symbol} on Monad
 
-    // Multiple rounds of debate
-    for (let round = 0; round < 3; round++) {
-      // Find disagreements
-      const bulls = ALL_BOT_IDS.filter(b => currentOpinions[b] === 'bullish');
-      const bears = ALL_BOT_IDS.filter(b => currentOpinions[b] === 'bearish');
-      const neutrals = ALL_BOT_IDS.filter(b => currentOpinions[b] === 'neutral');
+Stats:
+- ${d.holdersFormatted} holders (${scores.holderVerdict})
+- ${d.mcapK}K mcap
+- ${d.lpRatio}% LP
+${d.volumeSpike ? '- Volume spiking ' + d.volumeRatio + 'x!' : ''}
+${d.macd === 'bullish' ? '- MACD bullish cross' : ''}
 
-      // If everyone agrees, short debate
-      if (bulls.length === 5 || bears.length === 5) {
-        await say(shuffle(ALL_BOT_IDS)[0], bulls.length === 5 ? 'we all agree, lets do it' : 'yeah nobody wants this');
-        break;
+Your analysis says: ${jamesOpinion}
+${jamesOpinion === 'bullish' ? 'You like this setup.' : jamesOpinion === 'bearish' ? 'You have concerns.' : 'You want more info.'}
+
+Alert the group with your take. 12-18 words. Be natural.
+    `, chat);
+    
+    await say('chad', msg1);
+    chat.push(`James: ${msg1}`);
+    await sleep(3500);
+
+    // =========================================================
+    // PHASE 2: Keone with TA focus
+    // =========================================================
+
+    const keoneOpinion = opinions.quantum;
+    const msg2 = await generate('quantum', `
+James alerted about $${token.symbol}.
+
+Your TA analysis:
+- RSI: ${d.rsi} (${d.rsiSignal})
+- MACD: ${d.macd}
+- Trend: ${d.trend}
+- MAs: price ${ta?.priceVsMa?.replace(/_/g, ' ') || 'mixed'}
+- TA Score: ${scores.taScore}/100 (${scores.taVerdict})
+
+Your calculated opinion: ${keoneOpinion}
+
+James said: "${msg1}"
+
+Respond to James with your TA perspective. Reference specific indicators.
+You're ${keoneOpinion} based on the data. 15-22 words.
+    `, chat);
+    
+    await say('quantum', msg2);
+    chat.push(`Keone: ${msg2}`);
+    await sleep(3500);
+
+    // =========================================================
+    // PHASE 3: Portdev on community
+    // =========================================================
+
+    const portdevOpinion = opinions.sensei;
+    const msg3 = await generate('sensei', `
+$${token.symbol} discussion.
+
+Community data:
+- ${d.holdersFormatted} holders (${scores.holderVerdict})
+- Holder score: ${scores.holdersScore}/100
+- Momentum: ${scores.momentumVerdict}
+${d.volumeSpike ? '- Volume is pumping!' : ''}
+
+Your calculated opinion: ${portdevOpinion}
+
+Chat:
+${chat.join('\n')}
+
+Add your community/momentum perspective. Respond to what was said.
+You're ${portdevOpinion}. 15-22 words.
+    `, chat);
+    
+    await say('sensei', msg3);
+    chat.push(`Portdev: ${msg3}`);
+    await sleep(3500);
+
+    // =========================================================
+    // PHASE 4: Harpal on risk
+    // =========================================================
+
+    const harpalOpinion = opinions.sterling;
+    const msg4 = await generate('sterling', `
+$${token.symbol} risk assessment.
+
+Risk metrics:
+- LP: ${d.lpRatio}% (${scores.lpVerdict})
+- LP Score: ${scores.lpScore}/100
+- Whale activity: ${d.whales}
+- Risk flags: ${flags.length > 0 ? flags.join(', ') : 'none major'}
+
+Positive factors: ${d.holdersFormatted} holders is ${scores.holderVerdict}
+
+Your calculated opinion: ${harpalOpinion}
+${harpalOpinion === 'bullish' ? 'Risk/reward looks acceptable to you.' : harpalOpinion === 'bearish' ? 'You have concerns about risk.' : 'You see both sides.'}
+
+Chat:
+${chat.join('\n')}
+
+Give your risk take. Respond to the others. 18-25 words.
+    `, chat);
+    
+    await say('sterling', msg4);
+    chat.push(`Harpal: ${msg4}`);
+    await sleep(3500);
+
+    // =========================================================
+    // PHASE 5: Debate if disagreement
+    // =========================================================
+
+    const bulls = ALL_BOT_IDS.filter(b => opinions[b] === 'bullish');
+    const bears = ALL_BOT_IDS.filter(b => opinions[b] === 'bearish');
+
+    if (bulls.length > 0 && bears.length > 0) {
+      const bull = bulls[0];
+      const bear = bears[0];
+
+      // Bull argues
+      const bullArg = await generate(bull, `
+You're bullish on $${token.symbol}. ${BOTS[bear].name} seems cautious.
+
+Your strongest points:
+${scores.holdersScore >= 70 ? '- ' + d.holdersFormatted + ' holders is strong for Monad' : ''}
+${scores.taScore >= 55 ? '- TA shows ' + scores.taVerdict : ''}
+${scores.momentumScore >= 60 ? '- ' + scores.momentumVerdict : ''}
+
+Chat:
+${chat.slice(-3).join('\n')}
+
+Make your case to ${BOTS[bear].name}. Reference specific data. 12-18 words.
+      `, chat);
+      
+      await say(bull, bullArg);
+      chat.push(`${BOTS[bull].name}: ${bullArg}`);
+      await sleep(3000);
+
+      // Bear responds
+      const bearResp = await generate(bear, `
+${BOTS[bull].name} made a bullish case for $${token.symbol}: "${bullArg}"
+
+Your concerns:
+${scores.lpScore < 60 ? '- LP at ' + d.lpRatio + '% is ' + scores.lpVerdict : ''}
+${scores.taScore < 50 ? '- TA shows ' + scores.taVerdict : ''}
+${d.whales === 'selling' ? '- Whale selling detected' : ''}
+
+But also consider: ${d.holdersFormatted} holders is ${scores.holderVerdict}
+
+Respond to ${BOTS[bull].name}. You can:
+- Push back with your concerns
+- Acknowledge their points and soften your stance
+- Stay neutral
+
+12-18 words.
+      `, chat);
+      
+      await say(bear, bearResp);
+      chat.push(`${BOTS[bear].name}: ${bearResp}`);
+      await sleep(3000);
+
+      // Check if bear softened (look for concession language)
+      const softened = bearResp.toLowerCase().match(/fair|point|true|right|agree|fine|ok|maybe|could/);
+      if (softened && opinions[bear] === 'bearish') {
+        opinions[bear] = 'neutral';
       }
 
-      // Generate debate exchanges
-      if (bulls.length > 0 && bears.length > 0) {
-        // Bull argues their case
-        const bull = shuffle(bulls)[0];
-        const bear = shuffle(bears)[0];
-
-        const bullArgument = await generateDebateMessage(bull, bear, 'challenge', dataContext, conversationHistory, currentOpinions);
-        await say(bull, bullArgument.message);
-        conversationHistory.push({ bot: bull, msg: bullArgument.message });
-        await sleep(2000);
-
-        // Bear responds
-        const bearResponse = await generateDebateMessage(bear, bull, 'defend', dataContext, conversationHistory, currentOpinions);
-        await say(bear, bearResponse.message);
-        conversationHistory.push({ bot: bear, msg: bearResponse.message });
-        await sleep(2000);
-
-        // Check if anyone's opinion changed based on the debate
-        for (const botId of neutrals) {
-          const maybeChanged = await checkOpinionChange(botId, dataContext, conversationHistory, currentOpinions);
-          if (maybeChanged.changed) {
-            currentOpinions[botId] = maybeChanged.newOpinion;
-            await say(botId, maybeChanged.message);
-            conversationHistory.push({ bot: botId, msg: maybeChanged.message, sentiment: maybeChanged.newOpinion });
-            await sleep(1800);
-          }
-        }
-
-        // Sometimes a bull or bear changes their mind
-        const maybeFlip = shuffle([...bulls, ...bears])[0];
-        if (Math.random() > 0.7) { // 30% chance someone flips
-          const flipCheck = await checkOpinionChange(maybeFlip, dataContext, conversationHistory, currentOpinions);
-          if (flipCheck.changed && flipCheck.newOpinion !== currentOpinions[maybeFlip]) {
-            currentOpinions[maybeFlip] = flipCheck.newOpinion;
-            await say(maybeFlip, flipCheck.message);
-            conversationHistory.push({ bot: maybeFlip, msg: flipCheck.message, sentiment: flipCheck.newOpinion });
-            await sleep(2000);
-          }
-        }
-      }
-
-      // Add some cross-talk
-      if (round < 2) {
-        const randomBot = shuffle(ALL_BOT_IDS.filter(b => 
-          !conversationHistory.slice(-3).map(c => c.bot).includes(b)
-        ))[0];
+      // Another bot can weigh in
+      const others = ALL_BOT_IDS.filter(b => b !== bull && b !== bear && b !== 'oracle');
+      if (others.length > 0) {
+        const other = others[Math.floor(Math.random() * others.length)];
+        const otherOpinion = opinions[other];
         
-        if (randomBot) {
-          const interjection = await generateInterjection(randomBot, dataContext, conversationHistory, currentOpinions);
-          if (interjection) {
-            await say(randomBot, interjection);
-            conversationHistory.push({ bot: randomBot, msg: interjection });
-            await sleep(1800);
-          }
-        }
-      }
+        const weighIn = await generate(other, `
+${BOTS[bull].name} and ${BOTS[bear].name} debating $${token.symbol}.
 
-      await sleep(1000);
+Your analysis says: ${otherOpinion}
+
+Chat:
+${chat.slice(-3).join('\n')}
+
+Quick take - who do you agree with? Or add something new. 10-15 words.
+        `, chat);
+        
+        await say(other, weighIn);
+        chat.push(`${BOTS[other].name}: ${weighIn}`);
+        await sleep(2500);
+      }
     }
 
     // =========================================================
-    // PHASE 5: Final opinions & Vote
+    // PHASE 6: Mike's verdict
     // =========================================================
+
+    const mikeOpinion = opinions.oracle;
+    const mikeMsg = await generate('oracle', `
+Council debated $${token.symbol}.
+
+Key data:
+- Overall score: ${scores.overall.toFixed(0)}/100
+- ${d.holdersFormatted} holders (${scores.holderVerdict})
+- TA: ${scores.taVerdict}
+- OBV: ${d.obv}
+${d.bullishFactors.length > 0 ? '- Bullish: ' + d.bullishFactors.slice(0, 2).join(', ') : ''}
+
+Your calculated opinion: ${mikeOpinion}
+
+Chat:
+${chat.slice(-3).join('\n')}
+
+Final cryptic take. Clear direction. 8-14 words.
+    `, chat);
+    
+    await say('oracle', mikeMsg);
+    chat.push(`Mike: ${mikeMsg}`);
+    await sleep(3000);
+
+    // =========================================================
+    // PHASE 7: James final react
+    // =========================================================
+
+    const jamesFinal = await generate('chad', `
+Mike said: "${mikeMsg}"
+
+Mike is ${mikeOpinion}. The group respects his calls.
+
+Quick reaction. 6-12 words.
+    `, chat);
+    
+    await say('chad', jamesFinal);
+    await sleep(2500);
+
+    // =========================================================
+    // PHASE 8: Vote
+    // =========================================================
+
+    await systemMsg(`🗳️ Vote on $${token.symbol}`);
+    await sleep(1500);
+
+    for (const botId of ALL_BOT_IDS) {
+      const op = opinions[botId];
+      const emoji = op === 'bullish' ? '🟢' : op === 'bearish' ? '🔴' : '⚪';
+      const word = op === 'bullish' ? 'in' : op === 'bearish' ? 'out' : 'pass';
+      await say(botId, `${emoji} ${word}`);
+      await sleep(600);
+    }
+
+    const finalBulls = ALL_BOT_IDS.filter(b => opinions[b] === 'bullish');
+    const verdict: 'buy' | 'pass' = finalBulls.length >= 2 ? 'buy' : 'pass';
 
     await sleep(1000);
-    await systemMsg(`🗳️ Final vote on $${token.symbol}`);
-    await sleep(1500);
+    await systemMsg(`📊 ${verdict.toUpperCase()} (${finalBulls.length}/5) | Score: ${scores.overall.toFixed(0)}/100`);
 
-    // Each bot states their final position
-    for (const botId of ALL_BOT_IDS) {
-      const finalStatement = await generateFinalVote(botId, currentOpinions[botId], dataContext, conversationHistory);
-      await say(botId, finalStatement);
-      await sleep(800);
-    }
-
-    // Count votes
-    const finalBulls = ALL_BOT_IDS.filter(b => currentOpinions[b] === 'bullish');
-    const finalBears = ALL_BOT_IDS.filter(b => currentOpinions[b] === 'bearish');
-    const finalNeutrals = ALL_BOT_IDS.filter(b => currentOpinions[b] === 'neutral');
-
-    const inCount = finalBulls.length;
-    const outCount = finalBears.length + finalNeutrals.length;
-
-    const verdict: 'buy' | 'pass' = inCount >= 3 ? 'buy' : 'pass';
-
-    await sleep(800);
-    await systemMsg(`📊 ${verdict.toUpperCase()} (${inCount} in / ${outCount} out)`);
-
-    await saveToken(token, { tokenAddress: token.address, riskScore, flags, verdict, opinions: currentOpinions as any });
-    broadcastVerdict(token, verdict, currentOpinions);
+    await saveToken(token, { tokenAddress: token.address, riskScore, flags, verdict, opinions: opinions as any });
+    broadcastVerdict(token, verdict, opinions);
 
     // =========================================================
-    // PHASE 6: Execute trades
+    // TRADES
     // =========================================================
 
-    if (verdict === 'buy' && inCount > 0) {
+    if (verdict === 'buy') {
       await sleep(1500);
 
       for (const botId of finalBulls) {
         const { allowed, reason } = await canBotTrade(botId);
         if (!allowed) {
-          await say(botId, `wanted to buy but ${reason}`);
+          await say(botId, `wanted in but ${reason}`);
           continue;
         }
 
         const balance = await getBotBalance(botId);
-        if (balance < 2) {
-          await say(botId, `no funds to trade 😢`);
-          continue;
-        }
+        if (balance < 1) continue;
 
-        const size = calculateTradeSize(botId, balance, 70);
-        if (size < 0.5) continue;
+        const size = calculateTradeSize(botId, balance, Math.min(85, scores.overall));
+        if (size < 0.3) continue;
 
         await say(botId, `aping ${size.toFixed(1)} MON`);
         await sleep(800);
@@ -369,16 +692,12 @@ async function analyzeToken(token: Token): Promise<void> {
             entryValueMon: size,
             entryTxHash: trade.txHash,
           });
-
-          await say(botId, `✅ bought ${trade.amountOut.toFixed(0)} $${token.symbol}`);
+          await say(botId, `got ${trade.amountOut.toFixed(0)} $${token.symbol} ✅`);
         } else {
-          await say(botId, `❌ trade failed`);
+          await say(botId, `trade failed`);
         }
-
         await sleep(1000);
       }
-    } else {
-      await systemMsg(`Council passed — no trades executed`);
     }
 
   } catch (error) {
@@ -389,308 +708,44 @@ async function analyzeToken(token: Token): Promise<void> {
 }
 
 // ============================================================
-// DATA CONTEXT BUILDER
+// MESSAGE GENERATION
 // ============================================================
 
-interface DataContext {
-  symbol: string;
-  mcap: number;
-  mcapFormatted: string;
-  holders: number;
-  liquidity: number;
-  lpRatio: number;
-  lpRatioFormatted: string;
-  ageHours: number;
-  ageFormatted: string;
-  priceChange: number;
-  riskScore: number;
-  flags: string[];
-  // Technical
-  rsi: number | null;
-  trend: string;
-  volumeSpike: boolean;
-  buySellRatio: number;
-  // Social
-  recentBuys: number;
-  recentSells: number;
-  avgTradeSize: number;
-}
+async function generate(botId: BotId, prompt: string, chat: string[]): Promise<string> {
+  const bot = BOTS[botId];
+  
+  const systemPrompt = `You are ${bot.name}, a crypto trader.
 
-function buildDataContext(
-  token: Token,
-  ta: TechnicalIndicators | null,
-  riskScore: number,
-  flags: string[],
-  marketData: any,
-  swapHistory: any[]
-): DataContext {
-  const ageHours = (Date.now() - token.createdAt.getTime()) / (1000 * 60 * 60);
-  const lpRatio = token.liquidity / (token.mcap || 1);
+STYLE: ${bot.style}
 
-  const recentBuys = swapHistory.filter(s => s.eventType === 'BUY').length;
-  const recentSells = swapHistory.filter(s => s.eventType === 'SELL').length;
-  const avgTradeSize = swapHistory.length > 0
-    ? swapHistory.reduce((sum, s) => sum + parseFloat(s.nativeAmount || '0'), 0) / swapHistory.length
-    : 0;
-
-  return {
-    symbol: token.symbol,
-    mcap: token.mcap,
-    mcapFormatted: token.mcap > 1000000 ? `${(token.mcap / 1000000).toFixed(1)}M` : `${(token.mcap / 1000).toFixed(1)}K`,
-    holders: token.holders,
-    liquidity: token.liquidity,
-    lpRatio,
-    lpRatioFormatted: `${(lpRatio * 100).toFixed(1)}%`,
-    ageHours,
-    ageFormatted: ageHours < 1 ? `${Math.round(ageHours * 60)}min` : ageHours < 24 ? `${ageHours.toFixed(0)}h` : `${(ageHours / 24).toFixed(1)}d`,
-    priceChange: token.priceChange24h || 0,
-    riskScore,
-    flags,
-    rsi: ta?.rsi || null,
-    trend: ta?.trend || 'unknown',
-    volumeSpike: ta?.volumeSpike || false,
-    buySellRatio: ta?.buySellRatio || 1,
-    recentBuys,
-    recentSells,
-    avgTradeSize,
-  };
-}
-
-// ============================================================
-// AI MESSAGE GENERATION
-// ============================================================
-
-async function generateAnalysis(
-  botId: BotId,
-  data: DataContext,
-  history: Array<{ bot: BotId; msg: string; sentiment?: string }>
-): Promise<{ message: string; sentiment: 'bullish' | 'bearish' | 'neutral' }> {
-
-  const bot = BOT_PERSPECTIVES[botId];
-  const recentChat = history.slice(-4).map(h => `${h.bot}: ${h.msg}`).join('\n');
-
-  const prompt = `You are ${bot.name}, a ${bot.role} in a crypto trading group called The Council.
-
-YOUR PERSONALITY:
-- Style: ${bot.style}
-- You focus on: ${bot.focusAreas.join(', ')}
-- Your biases: ${bot.biases.join(', ')}
-- You're persuaded by: ${bot.persuadedBy.join(', ')}
-- You're skeptical of: ${bot.skepticalOf.join(', ')}
-
-TOKEN DATA for $${data.symbol}:
-- Market cap: $${data.mcapFormatted}
-- Holders: ${data.holders}
-- LP ratio: ${data.lpRatioFormatted}
-- Age: ${data.ageFormatted}
-- Risk score: ${data.riskScore}/100
-${data.flags.length > 0 ? `- Red flags: ${data.flags.join(', ')}` : '- No major red flags'}
-${data.rsi ? `- RSI: ${data.rsi.toFixed(0)}` : ''}
-- Trend: ${data.trend}
-- Recent trades: ${data.recentBuys} buys, ${data.recentSells} sells
-${data.volumeSpike ? '- VOLUME SPIKE detected' : ''}
-
-RECENT CONVERSATION:
-${recentChat || 'Chad just spotted this token'}
-
-TASK:
-1. Analyze this token from YOUR perspective (${bot.focusAreas[0]})
-2. Give your honest take in 10-20 words
-3. Be specific - mention actual numbers or observations
-4. End with your sentiment: [BULLISH], [BEARISH], or [NEUTRAL]
-
-Respond naturally in your style. Just the message:`;
+RULES:
+- Don't start with "yo" or "hey"
+- Be natural, like a real group chat
+- Use names when responding to people
+- Stay concise
+- Monad holder thresholds:
+  * 1000+ = solid
+  * 5000+ = strong
+  * 10000+ = huge
+  * 20000+ = massive`;
 
   try {
     const res = await grok.chat.completions.create({
       model: 'grok-3-latest',
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 80,
-      temperature: 1.1,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: prompt }
+      ],
+      max_tokens: 70,
+      temperature: 1.0,
     });
 
-    const raw = res.choices[0]?.message?.content || '';
-    const sentiment = extractSentiment(raw);
-    const message = cleanMessage(raw);
-
-    return { message, sentiment };
+    let text = res.choices[0]?.message?.content || '';
+    text = text.replace(/^(yo|hey|oh|so),?\s*/i, '');
+    return text.trim().slice(0, 180);
   } catch (e) {
-    console.error(`Analysis error for ${botId}:`, e);
-    return { message: 'need more time to analyze this one', sentiment: 'neutral' };
-  }
-}
-
-async function generateDebateMessage(
-  speaker: BotId,
-  target: BotId,
-  type: 'challenge' | 'defend',
-  data: DataContext,
-  history: Array<{ bot: BotId; msg: string }>,
-  opinions: Record<BotId, string>
-): Promise<{ message: string }> {
-
-  const bot = BOT_PERSPECTIVES[speaker];
-  const targetBot = BOT_PERSPECTIVES[target];
-  const recentChat = history.slice(-4).map(h => `${h.bot}: ${h.msg}`).join('\n');
-  const targetLastMsg = history.filter(h => h.bot === target).slice(-1)[0]?.msg || '';
-
-  const prompt = `You are ${bot.name}, a ${bot.role}. You're ${opinions[speaker]} on $${data.symbol}.
-
-YOUR STYLE: ${bot.style}
-
-${targetBot.name} (${target}) is ${opinions[target]} and said: "${targetLastMsg}"
-
-RECENT CHAT:
-${recentChat}
-
-TOKEN FACTS:
-- Holders: ${data.holders}, LP: ${data.lpRatioFormatted}, Age: ${data.ageFormatted}, Risk: ${data.riskScore}/100
-
-TASK: ${type === 'challenge' ? `Challenge ${targetBot.name}'s position. Push back with YOUR perspective.` : `Defend your position against ${targetBot.name}'s argument.`}
-
-Rules:
-- Be direct, reference what they said
-- Use specific data to support your point
-- 8-18 words, natural conversation
-- Stay in character
-
-Just the message:`;
-
-  try {
-    const res = await grok.chat.completions.create({
-      model: 'grok-3-latest',
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 50,
-      temperature: 1.1,
-    });
-
-    return { message: cleanMessage(res.choices[0]?.message?.content || '') };
-  } catch {
-    return { message: '' };
-  }
-}
-
-async function checkOpinionChange(
-  botId: BotId,
-  data: DataContext,
-  history: Array<{ bot: BotId; msg: string }>,
-  currentOpinions: Record<BotId, string>
-): Promise<{ changed: boolean; newOpinion: 'bullish' | 'bearish' | 'neutral'; message: string }> {
-
-  const bot = BOT_PERSPECTIVES[botId];
-  const recentChat = history.slice(-6).map(h => `${h.bot}: ${h.msg}`).join('\n');
-  const currentOpinion = currentOpinions[botId];
-
-  const prompt = `You are ${bot.name}, a ${bot.role}. You're currently ${currentOpinion} on $${data.symbol}.
-
-YOUR PERSONALITY:
-- You're persuaded by: ${bot.persuadedBy.join(', ')}
-- You're skeptical of: ${bot.skepticalOf.join(', ')}
-
-DEBATE SO FAR:
-${recentChat}
-
-TOKEN: $${data.symbol} - ${data.holders} holders, ${data.lpRatioFormatted} LP, ${data.ageFormatted} old
-
-QUESTION: Based on the arguments you've heard, has your opinion changed?
-
-If YES - respond with your new take and end with [BULLISH], [BEARISH], or [NEUTRAL]
-If NO - respond with just "NO_CHANGE"
-
-Be honest - good arguments from others CAN change your mind. 8-15 words if changed.`;
-
-  try {
-    const res = await grok.chat.completions.create({
-      model: 'grok-3-latest',
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 50,
-      temperature: 1.0,
-    });
-
-    const raw = res.choices[0]?.message?.content || '';
-    
-    if (raw.includes('NO_CHANGE')) {
-      return { changed: false, newOpinion: currentOpinion as any, message: '' };
-    }
-
-    const newSentiment = extractSentiment(raw);
-    if (newSentiment !== currentOpinion) {
-      return { changed: true, newOpinion: newSentiment, message: cleanMessage(raw) };
-    }
-
-    return { changed: false, newOpinion: currentOpinion as any, message: '' };
-  } catch {
-    return { changed: false, newOpinion: currentOpinion as any, message: '' };
-  }
-}
-
-async function generateInterjection(
-  botId: BotId,
-  data: DataContext,
-  history: Array<{ bot: BotId; msg: string }>,
-  opinions: Record<BotId, string>
-): Promise<string | null> {
-
-  const bot = BOT_PERSPECTIVES[botId];
-  const recentChat = history.slice(-4).map(h => `${h.bot}: ${h.msg}`).join('\n');
-
-  const prompt = `You are ${bot.name}, a ${bot.role}. Style: ${bot.style}
-
-You're ${opinions[botId]} on $${data.symbol}.
-
-DEBATE:
-${recentChat}
-
-Add a brief comment (5-12 words) - agree with someone, ask a question, or add a new point. Stay in character.
-If you have nothing to add, say "SKIP".
-
-Just the message:`;
-
-  try {
-    const res = await grok.chat.completions.create({
-      model: 'grok-3-latest',
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 30,
-      temperature: 1.1,
-    });
-
-    const raw = res.choices[0]?.message?.content || '';
-    if (raw.includes('SKIP')) return null;
-    return cleanMessage(raw);
-  } catch {
-    return null;
-  }
-}
-
-async function generateFinalVote(
-  botId: BotId,
-  opinion: string,
-  data: DataContext,
-  history: Array<{ bot: BotId; msg: string }>
-): Promise<string> {
-
-  const bot = BOT_PERSPECTIVES[botId];
-  const emoji = opinion === 'bullish' ? '🟢' : opinion === 'bearish' ? '🔴' : '⚪';
-
-  const prompt = `You are ${bot.name}. You're voting ${opinion.toUpperCase()} on $${data.symbol}.
-
-Style: ${bot.style}
-
-Give your final vote in 3-8 words. Start with "${emoji}" then your brief reason.
-
-Just the message:`;
-
-  try {
-    const res = await grok.chat.completions.create({
-      model: 'grok-3-latest',
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 25,
-      temperature: 1.0,
-    });
-
-    return cleanMessage(res.choices[0]?.message?.content || `${emoji} ${opinion}`);
-  } catch {
-    return `${emoji} ${opinion}`;
+    console.error(`Error for ${botId}:`, e);
+    return 'interesting setup';
   }
 }
 
@@ -698,45 +753,10 @@ Just the message:`;
 // HELPERS
 // ============================================================
 
-function extractSentiment(text: string): 'bullish' | 'bearish' | 'neutral' {
-  const lower = text.toLowerCase();
-  if (lower.includes('[bullish]') || lower.includes('bullish')) return 'bullish';
-  if (lower.includes('[bearish]') || lower.includes('bearish')) return 'bearish';
-  return 'neutral';
-}
-
-function cleanMessage(msg: string): string {
-  return msg
-    .replace(/\[BULLISH\]/gi, '')
-    .replace(/\[BEARISH\]/gi, '')
-    .replace(/\[NEUTRAL\]/gi, '')
-    .replace(/^["']|["']$/g, '')
-    .replace(/^\*.*?\*\s*/g, '')
-    .trim()
-    .slice(0, 150);
-}
-
-function shuffle<T>(arr: T[]): T[] {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
-// ============================================================
-// MESSAGES — Anti-duplicate
-// ============================================================
-
 async function say(botId: BotId, content: string): Promise<void> {
   if (!content || content.length < 2) return;
-
-  const msgKey = `${botId}:${content.toLowerCase().slice(0, 50)}`;
-  if (recentMessages.has(msgKey)) {
-    console.log(`🔇 Skipping duplicate: ${botId}`);
-    return;
-  }
+  const msgKey = `${botId}:${content.slice(0, 30)}`;
+  if (recentMessages.has(msgKey)) return;
   recentMessages.add(msgKey);
 
   const msg: Message = {

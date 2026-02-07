@@ -1,5 +1,6 @@
 // ============================================================
 // PATTERN RECOGNITION — Chart patterns for trading bots
+// FIXED: NaN protection + better price formatting
 // ============================================================
 
 import type { OHLCV } from './technicalAnalysis.js';
@@ -12,7 +13,7 @@ export interface PatternResult {
   name: string;
   type: 'reversal' | 'continuation' | 'candlestick';
   direction: 'bullish' | 'bearish' | 'neutral';
-  confidence: number;  // 0-100
+  confidence: number;
   description: string;
   priceTarget?: number;
   stopLoss?: number;
@@ -22,18 +23,34 @@ export interface ChannelResult {
   type: 'ascending' | 'descending' | 'horizontal' | 'none';
   upperLine: { slope: number; intercept: number };
   lowerLine: { slope: number; intercept: number };
-  strength: number;  // 0-100, how well price respects the channel
+  strength: number;
   breakout: 'above' | 'below' | 'none';
-}
-
-export interface TrendlineResult {
-  support: { slope: number; intercept: number; touches: number };
-  resistance: { slope: number; intercept: number; touches: number };
 }
 
 // ============================================================
 // HELPER FUNCTIONS
 // ============================================================
+
+// Safe number formatting - prevents NaN in output
+function safeFormat(value: number | undefined | null, decimals: number = 8): string {
+  if (value === undefined || value === null || !isFinite(value) || isNaN(value)) {
+    return '---';
+  }
+  // For very small numbers, use scientific notation
+  if (Math.abs(value) < 0.0000001 && value !== 0) {
+    return value.toExponential(2);
+  }
+  // For normal numbers
+  return value.toFixed(decimals);
+}
+
+// Safe percentage formatting
+function safePercent(value: number | undefined | null): string {
+  if (value === undefined || value === null || !isFinite(value) || isNaN(value)) {
+    return '---';
+  }
+  return value.toFixed(1) + '%';
+}
 
 function findLocalMaxima(data: number[], order: number = 3): number[] {
   const maxima: number[] = [];
@@ -73,22 +90,26 @@ function linearRegression(x: number[], y: number[]): { slope: number; intercept:
   const sumY = y.reduce((a, b) => a + b, 0);
   const sumXY = x.reduce((acc, xi, i) => acc + xi * y[i], 0);
   const sumX2 = x.reduce((acc, xi) => acc + xi * xi, 0);
-  const sumY2 = y.reduce((acc, yi) => acc + yi * yi, 0);
   
-  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+  const denom = n * sumX2 - sumX * sumX;
+  if (denom === 0) return { slope: 0, intercept: sumY / n, r2: 0 };
+  
+  const slope = (n * sumXY - sumX * sumY) / denom;
   const intercept = (sumY - slope * sumX) / n;
   
-  // R-squared
   const yMean = sumY / n;
   const ssTotal = y.reduce((acc, yi) => acc + (yi - yMean) ** 2, 0);
   const ssResidual = y.reduce((acc, yi, i) => acc + (yi - (slope * x[i] + intercept)) ** 2, 0);
-  const r2 = ssTotal > 0 ? 1 - ssResidual / ssTotal : 0;
+  const r2 = ssTotal > 0 ? Math.max(0, 1 - ssResidual / ssTotal) : 0;
   
   return { slope, intercept, r2 };
 }
 
 function percentDiff(a: number, b: number): number {
-  return Math.abs(a - b) / ((a + b) / 2) * 100;
+  if (a === 0 && b === 0) return 0;
+  const avg = (a + b) / 2;
+  if (avg === 0) return 100;
+  return Math.abs(a - b) / avg * 100;
 }
 
 // ============================================================
@@ -103,36 +124,30 @@ export function detectHeadAndShoulders(candles: OHLCV[]): PatternResult | null {
   const closes = candles.map(c => c.close);
   
   const maxima = findLocalMaxima(highs, 4);
-  
   if (maxima.length < 3) return null;
   
-  // Look for H&S pattern in recent maxima
   for (let i = maxima.length - 1; i >= 2; i--) {
     const rightShoulder = maxima[i];
     const head = maxima[i - 1];
     const leftShoulder = maxima[i - 2];
     
-    // Head must be highest
     if (highs[head] <= highs[leftShoulder] || highs[head] <= highs[rightShoulder]) continue;
-    
-    // Shoulders should be roughly equal (within 5%)
     if (percentDiff(highs[leftShoulder], highs[rightShoulder]) > 5) continue;
     
-    // Head should be significantly higher (at least 3%)
     const avgShoulders = (highs[leftShoulder] + highs[rightShoulder]) / 2;
+    if (avgShoulders === 0) continue;
     if ((highs[head] - avgShoulders) / avgShoulders * 100 < 3) continue;
     
-    // Find neckline (lows between shoulders and head)
     const necklineLeft = Math.min(...lows.slice(leftShoulder, head));
     const necklineRight = Math.min(...lows.slice(head, rightShoulder));
     const neckline = (necklineLeft + necklineRight) / 2;
     
-    // Check if we're breaking neckline
+    if (!isFinite(neckline) || neckline === 0) continue;
+    
     const currentPrice = closes[closes.length - 1];
     const breakdown = currentPrice < neckline;
     
     if (rightShoulder > candles.length - 10) {
-      // Recent pattern
       const patternHeight = highs[head] - neckline;
       const priceTarget = neckline - patternHeight;
       
@@ -142,10 +157,10 @@ export function detectHeadAndShoulders(candles: OHLCV[]): PatternResult | null {
         direction: 'bearish',
         confidence: breakdown ? 85 : 65,
         description: breakdown 
-          ? `H&S confirmed, neckline broken at ${neckline.toFixed(8)}`
-          : `H&S forming, watch neckline at ${neckline.toFixed(8)}`,
-        priceTarget,
-        stopLoss: highs[head],
+          ? `H&S confirmed, neckline broken`
+          : `H&S forming, watch neckline`,
+        priceTarget: isFinite(priceTarget) ? priceTarget : undefined,
+        stopLoss: isFinite(highs[head]) ? highs[head] : undefined,
       };
     }
   }
@@ -158,9 +173,9 @@ export function detectInverseHeadAndShoulders(candles: OHLCV[]): PatternResult |
   
   const lows = candles.map(c => c.low);
   const closes = candles.map(c => c.close);
+  const highs = candles.map(c => c.high);
   
   const minima = findLocalMinima(lows, 4);
-  
   if (minima.length < 3) return null;
   
   for (let i = minima.length - 1; i >= 2; i--) {
@@ -168,21 +183,18 @@ export function detectInverseHeadAndShoulders(candles: OHLCV[]): PatternResult |
     const head = minima[i - 1];
     const leftShoulder = minima[i - 2];
     
-    // Head must be lowest
     if (lows[head] >= lows[leftShoulder] || lows[head] >= lows[rightShoulder]) continue;
-    
-    // Shoulders roughly equal
     if (percentDiff(lows[leftShoulder], lows[rightShoulder]) > 5) continue;
     
-    // Head significantly lower
     const avgShoulders = (lows[leftShoulder] + lows[rightShoulder]) / 2;
+    if (lows[head] === 0) continue;
     if ((avgShoulders - lows[head]) / lows[head] * 100 < 3) continue;
     
-    // Neckline
-    const highs = candles.map(c => c.high);
     const necklineLeft = Math.max(...highs.slice(leftShoulder, head));
     const necklineRight = Math.max(...highs.slice(head, rightShoulder));
     const neckline = (necklineLeft + necklineRight) / 2;
+    
+    if (!isFinite(neckline)) continue;
     
     const currentPrice = closes[closes.length - 1];
     const breakout = currentPrice > neckline;
@@ -197,10 +209,10 @@ export function detectInverseHeadAndShoulders(candles: OHLCV[]): PatternResult |
         direction: 'bullish',
         confidence: breakout ? 85 : 65,
         description: breakout
-          ? `Inv H&S confirmed, breakout above ${neckline.toFixed(8)}`
-          : `Inv H&S forming, watch breakout at ${neckline.toFixed(8)}`,
-        priceTarget,
-        stopLoss: lows[head],
+          ? `Inv H&S confirmed, breakout`
+          : `Inv H&S forming, watch for breakout`,
+        priceTarget: isFinite(priceTarget) ? priceTarget : undefined,
+        stopLoss: isFinite(lows[head]) ? lows[head] : undefined,
       };
     }
   }
@@ -216,24 +228,21 @@ export function detectDoubleTop(candles: OHLCV[]): PatternResult | null {
   const closes = candles.map(c => c.close);
   
   const maxima = findLocalMaxima(highs, 3);
-  
   if (maxima.length < 2) return null;
   
-  // Check last two peaks
   const peak2 = maxima[maxima.length - 1];
   const peak1 = maxima[maxima.length - 2];
   
-  // Peaks should be within 3% of each other
   if (percentDiff(highs[peak1], highs[peak2]) > 3) return null;
   
-  // Must have a valley between them
-  const valley = Math.min(...lows.slice(peak1, peak2));
+  const valleySlice = lows.slice(peak1, peak2 + 1);
+  if (valleySlice.length === 0) return null;
+  
+  const valley = Math.min(...valleySlice);
   const peakAvg = (highs[peak1] + highs[peak2]) / 2;
   
-  // Valley should be at least 5% below peaks
+  if (!isFinite(valley) || !isFinite(peakAvg) || peakAvg === 0) return null;
   if ((peakAvg - valley) / peakAvg * 100 < 5) return null;
-  
-  // Check if recent
   if (peak2 < candles.length - 8) return null;
   
   const currentPrice = closes[closes.length - 1];
@@ -248,10 +257,10 @@ export function detectDoubleTop(candles: OHLCV[]): PatternResult | null {
     direction: 'bearish',
     confidence: breakdown ? 80 : 60,
     description: breakdown
-      ? `Double top confirmed, support broken at ${valley.toFixed(8)}`
-      : `Double top forming at ${peakAvg.toFixed(8)}, support at ${valley.toFixed(8)}`,
-    priceTarget,
-    stopLoss: peakAvg,
+      ? `Double top confirmed, support broken`
+      : `Double top forming, watch support level`,
+    priceTarget: isFinite(priceTarget) ? priceTarget : undefined,
+    stopLoss: isFinite(peakAvg) ? peakAvg : undefined,
   };
 }
 
@@ -263,22 +272,21 @@ export function detectDoubleBottom(candles: OHLCV[]): PatternResult | null {
   const closes = candles.map(c => c.close);
   
   const minima = findLocalMinima(lows, 3);
-  
   if (minima.length < 2) return null;
   
   const bottom2 = minima[minima.length - 1];
   const bottom1 = minima[minima.length - 2];
   
-  // Bottoms within 3%
   if (percentDiff(lows[bottom1], lows[bottom2]) > 3) return null;
   
-  // Peak between them
-  const peak = Math.max(...highs.slice(bottom1, bottom2));
+  const peakSlice = highs.slice(bottom1, bottom2 + 1);
+  if (peakSlice.length === 0) return null;
+  
+  const peak = Math.max(...peakSlice);
   const bottomAvg = (lows[bottom1] + lows[bottom2]) / 2;
   
-  // Peak at least 5% above bottoms
+  if (!isFinite(peak) || !isFinite(bottomAvg) || bottomAvg === 0) return null;
   if ((peak - bottomAvg) / bottomAvg * 100 < 5) return null;
-  
   if (bottom2 < candles.length - 8) return null;
   
   const currentPrice = closes[closes.length - 1];
@@ -293,10 +301,10 @@ export function detectDoubleBottom(candles: OHLCV[]): PatternResult | null {
     direction: 'bullish',
     confidence: breakout ? 80 : 60,
     description: breakout
-      ? `Double bottom confirmed, breakout above ${peak.toFixed(8)}`
-      : `Double bottom forming at ${bottomAvg.toFixed(8)}, resistance at ${peak.toFixed(8)}`,
-    priceTarget,
-    stopLoss: bottomAvg,
+      ? `Double bottom confirmed, breakout above resistance`
+      : `Double bottom forming, watch resistance level`,
+    priceTarget: isFinite(priceTarget) ? priceTarget : undefined,
+    stopLoss: isFinite(bottomAvg) ? bottomAvg : undefined,
   };
 }
 
@@ -305,30 +313,36 @@ export function detectDoubleBottom(candles: OHLCV[]): PatternResult | null {
 // ============================================================
 
 export function detectChannel(candles: OHLCV[]): ChannelResult {
-  if (candles.length < 15) {
-    return { type: 'none', upperLine: { slope: 0, intercept: 0 }, lowerLine: { slope: 0, intercept: 0 }, strength: 0, breakout: 'none' };
-  }
+  const noChannel: ChannelResult = {
+    type: 'none',
+    upperLine: { slope: 0, intercept: 0 },
+    lowerLine: { slope: 0, intercept: 0 },
+    strength: 0,
+    breakout: 'none'
+  };
+  
+  if (candles.length < 15) return noChannel;
   
   const highs = candles.map(c => c.high);
   const lows = candles.map(c => c.low);
   const closes = candles.map(c => c.close);
   const x = candles.map((_, i) => i);
   
-  // Fit lines to highs and lows
   const upperReg = linearRegression(x, highs);
   const lowerReg = linearRegression(x, lows);
   
-  // Check if lines are roughly parallel (similar slope)
   const slopeRatio = Math.abs(upperReg.slope) > 0.0000001 
     ? lowerReg.slope / upperReg.slope 
     : 0;
   
   const isParallel = slopeRatio > 0.5 && slopeRatio < 2;
   
-  // Determine channel type
   let channelType: 'ascending' | 'descending' | 'horizontal' | 'none' = 'none';
   const avgSlope = (upperReg.slope + lowerReg.slope) / 2;
   const priceRange = Math.max(...highs) - Math.min(...lows);
+  
+  if (priceRange === 0) return noChannel;
+  
   const slopePercent = (avgSlope * candles.length) / priceRange * 100;
   
   if (!isParallel) {
@@ -341,7 +355,6 @@ export function detectChannel(candles: OHLCV[]): ChannelResult {
     channelType = 'descending';
   }
   
-  // Calculate how well price respects the channel
   let touches = 0;
   const tolerance = priceRange * 0.02;
   
@@ -355,7 +368,6 @@ export function detectChannel(candles: OHLCV[]): ChannelResult {
   
   const strength = Math.min(100, (touches / candles.length) * 100);
   
-  // Check for breakout
   const lastPrice = closes[closes.length - 1];
   const lastUpper = upperReg.slope * (candles.length - 1) + upperReg.intercept;
   const lastLower = lowerReg.slope * (candles.length - 1) + lowerReg.intercept;
@@ -368,7 +380,7 @@ export function detectChannel(candles: OHLCV[]): ChannelResult {
     type: channelType,
     upperLine: { slope: upperReg.slope, intercept: upperReg.intercept },
     lowerLine: { slope: lowerReg.slope, intercept: lowerReg.intercept },
-    strength,
+    strength: isFinite(strength) ? strength : 0,
     breakout,
   };
 }
@@ -384,51 +396,42 @@ export function detectTriangle(candles: OHLCV[]): PatternResult | null {
   const lows = candles.map(c => c.low);
   const closes = candles.map(c => c.close);
   
-  // Find swing highs and lows
   const maxima = findLocalMaxima(highs, 2);
   const minima = findLocalMinima(lows, 2);
   
   if (maxima.length < 2 || minima.length < 2) return null;
   
-  // Get recent swing points
   const recentMaxima = maxima.slice(-4);
   const recentMinima = minima.slice(-4);
   
-  // Fit lines
-  const upperX = recentMaxima;
   const upperY = recentMaxima.map(i => highs[i]);
-  const lowerX = recentMinima;
   const lowerY = recentMinima.map(i => lows[i]);
   
-  if (upperX.length < 2 || lowerX.length < 2) return null;
+  if (recentMaxima.length < 2 || recentMinima.length < 2) return null;
   
-  const upperReg = linearRegression(upperX, upperY);
-  const lowerReg = linearRegression(lowerX, lowerY);
+  const upperReg = linearRegression(recentMaxima, upperY);
+  const lowerReg = linearRegression(recentMinima, lowerY);
   
-  // Determine triangle type
   const upperSlope = upperReg.slope;
   const lowerSlope = lowerReg.slope;
   
   let triangleType: 'ascending' | 'descending' | 'symmetrical' | null = null;
   
-  // Ascending: flat top, rising bottom
   if (Math.abs(upperSlope) < Math.abs(lowerSlope) * 0.3 && lowerSlope > 0) {
     triangleType = 'ascending';
-  }
-  // Descending: falling top, flat bottom
-  else if (Math.abs(lowerSlope) < Math.abs(upperSlope) * 0.3 && upperSlope < 0) {
+  } else if (Math.abs(lowerSlope) < Math.abs(upperSlope) * 0.3 && upperSlope < 0) {
     triangleType = 'descending';
-  }
-  // Symmetrical: converging lines
-  else if (upperSlope < 0 && lowerSlope > 0) {
+  } else if (upperSlope < 0 && lowerSlope > 0) {
     triangleType = 'symmetrical';
   }
   
   if (!triangleType) return null;
   
-  // Check if converging (apex in future)
-  const apex = (lowerReg.intercept - upperReg.intercept) / (upperReg.slope - lowerReg.slope);
-  if (apex < candles.length) return null;  // Already past apex
+  const slopeDiff = upperReg.slope - lowerReg.slope;
+  if (slopeDiff === 0) return null;
+  
+  const apex = (lowerReg.intercept - upperReg.intercept) / slopeDiff;
+  if (!isFinite(apex) || apex < candles.length) return null;
   
   const currentPrice = closes[closes.length - 1];
   const lastUpper = upperReg.slope * (candles.length - 1) + upperReg.intercept;
@@ -452,8 +455,8 @@ export function detectTriangle(candles: OHLCV[]): PatternResult | null {
     description: breakout !== 'none'
       ? `${triangleType} triangle breakout ${breakout}`
       : `${triangleType} triangle forming, apex in ~${Math.floor(apex - candles.length)} candles`,
-    priceTarget: breakout === 'above' ? currentPrice + patternHeight 
-      : breakout === 'below' ? currentPrice - patternHeight 
+    priceTarget: breakout === 'above' && isFinite(patternHeight) ? currentPrice + patternHeight 
+      : breakout === 'below' && isFinite(patternHeight) ? currentPrice - patternHeight 
       : undefined,
   };
 }
@@ -473,10 +476,8 @@ export function detectWedge(candles: OHLCV[]): PatternResult | null {
   const upperReg = linearRegression(x, highs);
   const lowerReg = linearRegression(x, lows);
   
-  // Both lines must slope in same direction
   if (Math.sign(upperReg.slope) !== Math.sign(lowerReg.slope)) return null;
   
-  // Lines must be converging
   const upperEnd = upperReg.slope * candles.length + upperReg.intercept;
   const lowerEnd = lowerReg.slope * candles.length + lowerReg.intercept;
   const upperStart = upperReg.intercept;
@@ -485,18 +486,18 @@ export function detectWedge(candles: OHLCV[]): PatternResult | null {
   const startWidth = upperStart - lowerStart;
   const endWidth = upperEnd - lowerEnd;
   
-  if (endWidth >= startWidth * 0.9) return null;  // Not converging enough
+  if (!isFinite(startWidth) || !isFinite(endWidth)) return null;
+  if (endWidth >= startWidth * 0.9) return null;
   
   const isRising = upperReg.slope > 0;
   const wedgeType = isRising ? 'Rising Wedge' : 'Falling Wedge';
-  const direction = isRising ? 'bearish' : 'bullish';  // Wedges break opposite to slope
+  const direction = isRising ? 'bearish' : 'bullish';
   
   const currentPrice = closes[closes.length - 1];
   let breakout: 'above' | 'below' | 'none' = 'none';
   if (currentPrice > upperEnd * 1.01) breakout = 'above';
   else if (currentPrice < lowerEnd * 0.99) breakout = 'below';
   
-  // Confirmed if breaks in expected direction
   const confirmed = (isRising && breakout === 'below') || (!isRising && breakout === 'above');
   
   return {
@@ -531,8 +532,9 @@ export function detectCandlestickPatterns(candles: OHLCV[]): PatternResult[] {
   const isBullish = (c: OHLCV) => c.close > c.open;
   const range = (c: OHLCV) => c.high - c.low;
   
-  // === DOJI ===
-  if (bodySize(last) < range(last) * 0.1) {
+  // DOJI
+  const lastRange = range(last);
+  if (lastRange > 0 && bodySize(last) < lastRange * 0.1) {
     patterns.push({
       name: 'Doji',
       type: 'candlestick',
@@ -542,13 +544,12 @@ export function detectCandlestickPatterns(candles: OHLCV[]): PatternResult[] {
     });
   }
   
-  // === HAMMER (at bottom) ===
-  if (wickLower(last) > bodySize(last) * 2 && wickUpper(last) < bodySize(last) * 0.5) {
-    // Check if at bottom of trend
+  // HAMMER
+  const lastBody = bodySize(last);
+  if (lastBody > 0 && wickLower(last) > lastBody * 2 && wickUpper(last) < lastBody * 0.5) {
     const recentLows = candles.slice(-10).map(c => c.low);
-    const isAtBottom = last.low <= Math.min(...recentLows) * 1.02;
-    
-    if (isAtBottom) {
+    const minLow = Math.min(...recentLows);
+    if (isFinite(minLow) && last.low <= minLow * 1.02) {
       patterns.push({
         name: 'Hammer',
         type: 'candlestick',
@@ -559,28 +560,11 @@ export function detectCandlestickPatterns(candles: OHLCV[]): PatternResult[] {
     }
   }
   
-  // === INVERTED HAMMER ===
-  if (wickUpper(last) > bodySize(last) * 2 && wickLower(last) < bodySize(last) * 0.5) {
-    const recentLows = candles.slice(-10).map(c => c.low);
-    const isAtBottom = last.low <= Math.min(...recentLows) * 1.02;
-    
-    if (isAtBottom) {
-      patterns.push({
-        name: 'Inverted Hammer',
-        type: 'candlestick',
-        direction: 'bullish',
-        confidence: 65,
-        description: 'Inverted hammer - potential bullish reversal',
-      });
-    }
-  }
-  
-  // === SHOOTING STAR (at top) ===
-  if (wickUpper(last) > bodySize(last) * 2 && wickLower(last) < bodySize(last) * 0.5) {
+  // SHOOTING STAR
+  if (lastBody > 0 && wickUpper(last) > lastBody * 2 && wickLower(last) < lastBody * 0.5) {
     const recentHighs = candles.slice(-10).map(c => c.high);
-    const isAtTop = last.high >= Math.max(...recentHighs) * 0.98;
-    
-    if (isAtTop) {
+    const maxHigh = Math.max(...recentHighs);
+    if (isFinite(maxHigh) && last.high >= maxHigh * 0.98) {
       patterns.push({
         name: 'Shooting Star',
         type: 'candlestick',
@@ -591,10 +575,11 @@ export function detectCandlestickPatterns(candles: OHLCV[]): PatternResult[] {
     }
   }
   
-  // === BULLISH ENGULFING ===
-  if (!isBullish(prev) && isBullish(last) && 
+  // BULLISH ENGULFING
+  const prevBody = bodySize(prev);
+  if (prevBody > 0 && !isBullish(prev) && isBullish(last) && 
       last.open < prev.close && last.close > prev.open &&
-      bodySize(last) > bodySize(prev) * 1.5) {
+      lastBody > prevBody * 1.5) {
     patterns.push({
       name: 'Bullish Engulfing',
       type: 'candlestick',
@@ -604,10 +589,10 @@ export function detectCandlestickPatterns(candles: OHLCV[]): PatternResult[] {
     });
   }
   
-  // === BEARISH ENGULFING ===
-  if (isBullish(prev) && !isBullish(last) && 
+  // BEARISH ENGULFING
+  if (prevBody > 0 && isBullish(prev) && !isBullish(last) && 
       last.open > prev.close && last.close < prev.open &&
-      bodySize(last) > bodySize(prev) * 1.5) {
+      lastBody > prevBody * 1.5) {
     patterns.push({
       name: 'Bearish Engulfing',
       type: 'candlestick',
@@ -617,11 +602,16 @@ export function detectCandlestickPatterns(candles: OHLCV[]): PatternResult[] {
     });
   }
   
-  // === MORNING STAR ===
-  if (!isBullish(prev2) && bodySize(prev2) > range(prev2) * 0.6 &&  // Big red
-      bodySize(prev) < range(prev) * 0.3 &&  // Small body (doji-ish)
-      isBullish(last) && bodySize(last) > range(last) * 0.6 &&  // Big green
-      last.close > (prev2.open + prev2.close) / 2) {  // Closes above midpoint
+  // MORNING STAR
+  const prev2Range = range(prev2);
+  const prevRange = range(prev);
+  const lastRangeCheck = range(last);
+  
+  if (prev2Range > 0 && prevRange > 0 && lastRangeCheck > 0 &&
+      !isBullish(prev2) && bodySize(prev2) > prev2Range * 0.6 &&
+      bodySize(prev) < prevRange * 0.3 &&
+      isBullish(last) && bodySize(last) > lastRangeCheck * 0.6 &&
+      last.close > (prev2.open + prev2.close) / 2) {
     patterns.push({
       name: 'Morning Star',
       type: 'candlestick',
@@ -631,11 +621,12 @@ export function detectCandlestickPatterns(candles: OHLCV[]): PatternResult[] {
     });
   }
   
-  // === EVENING STAR ===
-  if (isBullish(prev2) && bodySize(prev2) > range(prev2) * 0.6 &&  // Big green
-      bodySize(prev) < range(prev) * 0.3 &&  // Small body
-      !isBullish(last) && bodySize(last) > range(last) * 0.6 &&  // Big red
-      last.close < (prev2.open + prev2.close) / 2) {  // Closes below midpoint
+  // EVENING STAR
+  if (prev2Range > 0 && prevRange > 0 && lastRangeCheck > 0 &&
+      isBullish(prev2) && bodySize(prev2) > prev2Range * 0.6 &&
+      bodySize(prev) < prevRange * 0.3 &&
+      !isBullish(last) && bodySize(last) > lastRangeCheck * 0.6 &&
+      last.close < (prev2.open + prev2.close) / 2) {
     patterns.push({
       name: 'Evening Star',
       type: 'candlestick',
@@ -645,10 +636,14 @@ export function detectCandlestickPatterns(candles: OHLCV[]): PatternResult[] {
     });
   }
   
-  // === THREE WHITE SOLDIERS ===
+  // THREE WHITE SOLDIERS
   if (candles.length >= 3) {
     const last3 = candles.slice(-3);
-    if (last3.every(c => isBullish(c) && bodySize(c) > range(c) * 0.6)) {
+    const allBullish = last3.every(c => {
+      const r = range(c);
+      return r > 0 && isBullish(c) && bodySize(c) > r * 0.6;
+    });
+    if (allBullish) {
       const increasing = last3[0].close < last3[1].close && last3[1].close < last3[2].close;
       if (increasing) {
         patterns.push({
@@ -662,10 +657,14 @@ export function detectCandlestickPatterns(candles: OHLCV[]): PatternResult[] {
     }
   }
   
-  // === THREE BLACK CROWS ===
+  // THREE BLACK CROWS
   if (candles.length >= 3) {
     const last3 = candles.slice(-3);
-    if (last3.every(c => !isBullish(c) && bodySize(c) > range(c) * 0.6)) {
+    const allBearish = last3.every(c => {
+      const r = range(c);
+      return r > 0 && !isBullish(c) && bodySize(c) > r * 0.6;
+    });
+    if (allBearish) {
       const decreasing = last3[0].close > last3[1].close && last3[1].close > last3[2].close;
       if (decreasing) {
         patterns.push({
@@ -694,7 +693,6 @@ export function detectAllPatterns(candles: OHLCV[]): {
 } {
   const patterns: PatternResult[] = [];
   
-  // Detect all pattern types
   const hs = detectHeadAndShoulders(candles);
   if (hs) patterns.push(hs);
   
@@ -716,10 +714,8 @@ export function detectAllPatterns(candles: OHLCV[]): {
   const candlesticks = detectCandlestickPatterns(candles);
   patterns.push(...candlesticks);
   
-  // Detect channel
   const channel = detectChannel(candles);
   
-  // Calculate dominant signal
   let bullishScore = 0;
   let bearishScore = 0;
   
@@ -729,7 +725,6 @@ export function detectAllPatterns(candles: OHLCV[]): {
     else if (p.direction === 'bearish') bearishScore += weight;
   }
   
-  // Add channel influence
   if (channel.type !== 'none') {
     if (channel.breakout === 'above') bullishScore += 0.5;
     else if (channel.breakout === 'below') bearishScore += 0.5;
@@ -741,7 +736,6 @@ export function detectAllPatterns(candles: OHLCV[]): {
   if (bullishScore > bearishScore + 0.5) dominantSignal = 'bullish';
   else if (bearishScore > bullishScore + 0.5) dominantSignal = 'bearish';
   
-  // Build summary
   const summaryParts: string[] = [];
   
   if (channel.type !== 'none') {
