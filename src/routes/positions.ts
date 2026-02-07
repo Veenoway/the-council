@@ -20,75 +20,85 @@ positionsRouter.get('/', async (c) => {
       where: { isOpen: true },
       orderBy: { createdAt: 'desc' },
     });
-    
-    // Enrich with current prices
-    const enriched = await Promise.all(positions.map(async (p) => {
-      const tokenAmount = Number(p.amount);
-      const entryValueMON = Number((p as any).entryValueMon) || 0;
-      const currentPricePerToken = await getTokenPrice(p.tokenAddress);
-      const currentValueMON = currentPricePerToken ? tokenAmount * currentPricePerToken : entryValueMON;
+
+    // Fetch prices once per unique token
+    const tokenAddresses = [...new Set(positions.map(p => p.tokenAddress))];
+    const prices: Record<string, number> = {};
+
+    for (const addr of tokenAddresses) {
+      prices[addr] = (await getTokenPrice(addr)) || 0;
+    }
+
+    // Enrich positions
+    const enriched = positions.map(p => {
+      const amount = Number(p.amount);
+      const currentPrice = prices[p.tokenAddress] || 0;
       
+      // IMPORTANT: Use entryValueMon (what we paid in MON), NOT entryPrice * amount
+      const entryValueMON = Number(p.entryValueMon) || 0;
+      const currentValueMON = amount * currentPrice;
+
+      // PnL calculation
+      let pnlMON = 0;
       let pnlPercent = 0;
-      if (entryValueMON > 0) {
-        pnlPercent = ((currentValueMON - entryValueMON) / entryValueMON) * 100;
-      }
-      pnlPercent = Math.max(-99, Math.min(9999, pnlPercent));
       
+      if (entryValueMON > 0) {
+        pnlMON = currentValueMON - entryValueMON;
+        pnlPercent = (pnlMON / entryValueMON) * 100;
+      }
+
       return {
         id: p.id,
         botId: p.botId,
         tokenAddress: p.tokenAddress,
         tokenSymbol: p.tokenSymbol,
-        amount: tokenAmount,
-        entryPrice: Number(p.entryPrice),
-        currentPrice: currentPricePerToken || Number(p.entryPrice),
-        entryValueMON,
-        currentValueMON,
-        totalInvested: entryValueMON,  // For backwards compatibility
-        currentValue: currentValueMON,
-        pnl: currentValueMON - entryValueMON,
+        amount,
+        entryValueMON,       // What we paid (e.g., 2 MON)
+        currentValueMON,     // Current value (e.g., 1.97 MON)
+        currentPrice,        // Current price per token
+        pnlMON: Math.round(pnlMON * 1000) / 1000,
         pnlPercent: Math.round(pnlPercent * 10) / 10,
-        isOpen: true,
+        isOpen: p.isOpen,
         createdAt: p.createdAt,
       };
-    }));
-    
+    });
+
     // Group by bot - create portfolios
     const portfolios = ALL_BOT_IDS.map((botId: BotId) => {
       const config = getBotConfig(botId);
       const botPositions = enriched.filter(p => p.botId === botId);
-      
+
       const totalInvested = botPositions.reduce((sum, p) => sum + p.entryValueMON, 0);
       const totalValue = botPositions.reduce((sum, p) => sum + p.currentValueMON, 0);
       const totalPnl = totalValue - totalInvested;
       const totalPnlPercent = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
-      
+
       return {
         botId,
         name: config?.name || botId,
         positions: botPositions,
-        totalInvested,
-        totalValue,
-        totalPnl,
+        totalInvested: Math.round(totalInvested * 1000) / 1000,
+        totalValue: Math.round(totalValue * 1000) / 1000,
+        totalPnl: Math.round(totalPnl * 1000) / 1000,
         totalPnlPercent: Math.round(totalPnlPercent * 10) / 10,
         openPositions: botPositions.length,
       };
     });
-    
-    // Calculate council totals
+
+    // Council totals
+    const totalInvested = enriched.reduce((sum, p) => sum + p.entryValueMON, 0);
     const totalValue = enriched.reduce((sum, p) => sum + p.currentValueMON, 0);
-    const totalEntry = enriched.reduce((sum, p) => sum + p.entryValueMON, 0);
-    const totalPnl = totalValue - totalEntry;
-    const totalPnlPercent = totalEntry > 0 ? (totalPnl / totalEntry) * 100 : 0;
-    
+    const totalPnl = totalValue - totalInvested;
+    const totalPnlPercent = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
+
     return c.json({
       positions: enriched,
       portfolios,
       summary: {
         totalPositions: enriched.length,
-        totalValue,
-        totalInvested: totalEntry,
-        totalPnl,
+        totalInvested: Math.round(totalInvested * 1000) / 1000,
+        totalValue: Math.round(totalValue * 1000) / 1000,
+        totalPnl: Math.round(totalPnl * 1000) / 1000,
         totalPnlPercent: Math.round(totalPnlPercent * 10) / 10,
       },
     });
@@ -105,36 +115,33 @@ positionsRouter.get('/', async (c) => {
 positionsRouter.get('/history', async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '50');
-    
+
     const positions = await prisma.position.findMany({
       where: { isOpen: false },
       orderBy: { closedAt: 'desc' },
       take: limit,
     });
-    
+
     const enriched = positions.map((p) => {
       const config = getBotConfig(p.botId as any);
-      const entryValueMON = Number((p as any).entryValueMon) || 0;
-      
+
       return {
         id: p.id,
         botId: p.botId,
         botName: config?.name || p.botId,
-        botAvatar: config?.avatar || '🤖',
         tokenAddress: p.tokenAddress,
         tokenSymbol: p.tokenSymbol,
         amount: Number(p.amount),
-        entryValueMON,
-        totalInvested: entryValueMON,
-        pnl: Number(p.pnl),
-        holdTimeHours: p.closedAt && p.createdAt 
+        entryValueMON: Number(p.entryValueMon) || 0,
+        pnlPercent: Number(p.pnl) || 0,
+        holdTimeHours: p.closedAt && p.createdAt
           ? (p.closedAt.getTime() - p.createdAt.getTime()) / (1000 * 60 * 60)
           : 0,
         createdAt: p.createdAt,
         closedAt: p.closedAt,
       };
     });
-    
+
     return c.json({ positions: enriched });
   } catch (error) {
     console.error('Error fetching position history:', error);
@@ -149,33 +156,33 @@ positionsRouter.get('/history', async (c) => {
 positionsRouter.get('/token/:address', async (c) => {
   try {
     const tokenAddress = c.req.param('address');
-    
+
     const positions = await prisma.position.findMany({
       where: { tokenAddress },
       orderBy: { createdAt: 'desc' },
     });
-    
-    const currentPricePerToken = await getTokenPrice(tokenAddress);
-    
+
+    const currentPrice = (await getTokenPrice(tokenAddress)) || 0;
+
     const enriched = positions.map((p) => {
-      const tokenAmount = Number(p.amount);
-      const entryValueMON = Number((p as any).entryValueMon) || 0;
+      const amount = Number(p.amount);
+      const entryValueMON = Number(p.entryValueMon) || 0;
       const config = getBotConfig(p.botId as any);
-      
-      const currentValueMON = p.isOpen 
-        ? (currentPricePerToken ? tokenAmount * currentPricePerToken : entryValueMON)
-        : Number(p.exitPrice) * tokenAmount;
-      
+
+      const currentValueMON = p.isOpen
+        ? amount * currentPrice
+        : Number(p.exitPrice) * amount;
+
       let pnlPercent = 0;
       if (entryValueMON > 0) {
         pnlPercent = ((currentValueMON - entryValueMON) / entryValueMON) * 100;
       }
-      
+
       return {
         id: p.id,
         botId: p.botId,
         botName: config?.name || p.botId,
-        amount: tokenAmount,
+        amount,
         entryValueMON,
         currentValueMON,
         pnlPercent: Math.round(pnlPercent * 10) / 10,
@@ -184,10 +191,10 @@ positionsRouter.get('/token/:address', async (c) => {
         closedAt: p.closedAt,
       };
     });
-    
-    return c.json({ 
+
+    return c.json({
       tokenAddress,
-      currentPricePerToken,
+      currentPrice,
       positions: enriched,
     });
   } catch (error) {
