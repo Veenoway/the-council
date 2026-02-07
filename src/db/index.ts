@@ -285,12 +285,13 @@ export async function getAnalyzedTokens(limit: number = 10): Promise<Token[]> {
 // ============================================================
 
 export async function createPosition(data: {
-  botId: string;
+  botId: BotId | `human_${string}`;
   tokenAddress: string;
   tokenSymbol: string;
   amount: number;
   entryPrice: number;
   entryTxHash: string;
+  entryValueMon: number;
 }): Promise<void> {
   await prisma.position.create({
     data: {
@@ -301,6 +302,7 @@ export async function createPosition(data: {
       entryPrice: data.entryPrice,
       entryTxHash: data.entryTxHash,
       isOpen: true,
+      entryValueMon: data.entryValueMon,
     },
   });
 }

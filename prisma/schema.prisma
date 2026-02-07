@@ -12,15 +12,16 @@ datasource db {
 }
 
 // ============================================================
-// MODELS
+// MESSAGES
 // ============================================================
 
 model Message {
   id          String   @id @default(uuid())
   botId       String
   content     String
-  token       String?  // Token address being discussed
-  messageType String   @default("chat") // chat, trade, system
+  token       String?
+  txHash      String?
+  messageType String   @default("chat")
   createdAt   DateTime @default(now())
 
   @@index([botId])
@@ -28,17 +29,22 @@ model Message {
   @@index([createdAt])
 }
 
+// ============================================================
+// TRADES
+// ============================================================
+
 model Trade {
   id           String   @id @default(uuid())
   botId        String
   tokenAddress String
   tokenSymbol  String
-  side         String   // buy, sell
-  amountIn     Float    // Amount spent (MON for buys)
-  amountOut    Float    // Amount received (tokens for buys)
-  price        Float    // Price at execution
+  side         String
+  amountIn     Float
+  amountOut    Float
+  price        Float
   txHash       String
-  status       String   @default("pending") // pending, confirmed, failed
+  status       String   @default("pending")
+  pnl          Float?
   createdAt    DateTime @default(now())
 
   @@index([botId])
@@ -46,6 +52,10 @@ model Trade {
   @@index([createdAt])
   @@index([status])
 }
+
+// ============================================================
+// TOKENS
+// ============================================================
 
 model Token {
   address        String   @id
@@ -57,19 +67,85 @@ model Token {
   liquidity      Float
   holders        Int
   deployer       String
+  verdict        String?
+  riskScore      Int?
+  analysis       Json?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
   @@index([symbol])
+  @@index([verdict])
   @@index([createdAt])
 }
 
+// ============================================================
+// POSITIONS
+// ============================================================
+
+model Position {
+  id           String    @id @default(uuid())
+  botId        String
+  tokenAddress String
+  tokenSymbol  String
+  amount       Float
+  entryPrice   Float
+  entryTxHash  String
+  isOpen       Boolean   @default(true)
+  exitPrice    Float?
+  exitTxHash   String?
+  pnl          Float?
+   entryValueMon Float?
+  createdAt    DateTime  @default(now())
+  closedAt     DateTime?
+
+  @@index([botId, isOpen])
+  @@index([tokenAddress])
+}
+
+// ============================================================
+// BOT STATS — All-time stats
+// ============================================================
+
+model BotStats {
+  botId         String   @id
+  totalTrades   Int      @default(0)
+  wins          Int      @default(0)
+  losses        Int      @default(0)
+  winRate       Float    @default(0)
+  totalPnl      Float    @default(0)
+  currentStreak Int      @default(0)
+  bestStreak    Int      @default(0)
+  updatedAt     DateTime @updatedAt
+}
+
+// ============================================================
+// BOT DAILY STATS — For leaderboard & betting
+// ============================================================
+
+model BotDailyStats {
+  id        String   @id @default(uuid())
+  botId     String
+  date      String
+  trades    Int      @default(0)
+  wins      Int      @default(0)
+  pnl       Float    @default(0)
+  volume    Float    @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([botId, date])
+  @@index([date])
+}
+
+// ============================================================
+// BOT WALLETS
+// ============================================================
+
 model BotWallet {
-  id         String   @id @default(uuid())
-  botId      String   @unique
-  address    String   @unique
-  balance    Float    @default(0)
-  updatedAt  DateTime @updatedAt
+  id        String   @id @default(uuid())
+  botId     String   @unique
+  address   String   @unique
+  balance   Float    @default(0)
+  updatedAt DateTime @updatedAt
 
   @@index([botId])
 }

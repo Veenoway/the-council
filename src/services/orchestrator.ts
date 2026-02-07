@@ -1,16 +1,23 @@
 // ============================================================
-// ORCHESTRATOR — Main coordinator for The Council
+// ORCHESTRATOR — Data-driven Council decisions
 // ============================================================
 
-import type { BotId, Token, Message, Trade, BotEvent, ChatContext, Position } from '../types/index.js';
+import type { BotId, Token, Message } from '../types/index.js';
 import { ALL_BOT_IDS, getBotConfig } from '../bots/personalities.js';
-import { generateBotResponse, generateTokenAnalysis, generateDiscussionResponse, selectBotsToReact } from './grok.js';
-import { getNewTokens, getTokenInfo, calculateRiskScore } from './nadfun.js';
-import { executeBotTrade, shouldBotTrade, calculateTradeSize, getBotBalance } from './trading.js';
+import { getNewTokens, calculateRiskScore } from './nadfun.js';
+import { executeBotTrade, calculateTradeSize, getBotBalance } from './trading.js';
 import { broadcastMessage, broadcastNewToken, broadcastVerdict, onInternalEvent } from './websocket.js';
-import { saveMessage, getRecentMessages, saveToken, getOpenPositions } from '../db/index.js';
+import { createPosition, saveMessage, saveToken } from '../db/index.js';
 import { setCurrentToken as setCurrentTokenInBus } from './messageBus.js';
+import { analyzeTechnicals, type TechnicalIndicators } from './technicalAnalysis.js';
 import { randomUUID } from 'crypto';
+import OpenAI from 'openai';
+import { canBotTrade } from './monitor.js';
+
+const grok = new OpenAI({
+  apiKey: process.env.XAI_API_KEY || process.env.GROK_API_KEY,
+  baseURL: 'https://api.x.ai/v1',
+});
 
 // ============================================================
 // STATE
@@ -19,378 +26,635 @@ import { randomUUID } from 'crypto';
 let currentToken: Token | null = null;
 let isAnalyzing = false;
 let lastTokenScan = 0;
-const TOKEN_SCAN_INTERVAL = 30_000; // 30 seconds
+const TOKEN_SCAN_INTERVAL = 60_000; 
 const seenTokens = new Set<string>();
 
 // ============================================================
-// MAIN LOOP
+// MAIN LOOP  
 // ============================================================
 
 export async function startOrchestrator(): Promise<void> {
   console.log('🏛️ The Council is now in session');
 
-  // Listen for human events
-  onInternalEvent('human_trade_request', handleHumanTradeRequest);
-  onInternalEvent('human_message', handleHumanMessage);
+  onInternalEvent('human_message', async (data) => {
+    await handleHumanMessage(data);
+  });
 
-  // Start the main loop
-  loop();
-}
-
-async function loop(): Promise<void> {
   while (true) {
     try {
-      // Scan for new tokens periodically
-      if (Date.now() - lastTokenScan > TOKEN_SCAN_INTERVAL && !isAnalyzing) {
-        await scanForNewTokens();
+      if (!isAnalyzing && Date.now() - lastTokenScan > TOKEN_SCAN_INTERVAL) {
         lastTokenScan = Date.now();
+        await scanForNewTokens();
       }
-
-      // Small delay to prevent CPU spinning
-      await sleep(1000);
+      await sleep(5000);
     } catch (error) {
       console.error('Orchestrator error:', error);
-      await sleep(5000);
+      await sleep(10000);
     }
   }
 }
 
-// ============================================================
-// TOKEN SCANNING
-// ============================================================
-
 async function scanForNewTokens(): Promise<void> {
-  const tokens = await getNewTokens(10);
-  
-  for (const token of tokens) {
-    if (seenTokens.has(token.address)) continue;
-    seenTokens.add(token.address);
-
-    // Testnet-friendly filters (lower thresholds)
-    if (token.mcap < 100) continue; // Min $100 mcap
-    if (token.holders < 2) continue; // At least 2 holders
-
-    console.log(`🔍 New token found: $${token.symbol}`);
+  try {
+    const tokens = await getNewTokens();
     
-    // Start analysis
-    await analyzeToken(token);
-    break; // Only analyze one token at a time
+    for (const token of tokens) {
+      if (seenTokens.has(token.address)) continue;
+      seenTokens.add(token.address);
+
+      // Filters - accept bigger tokens now
+      if (token.mcap < 5000) continue;
+      if (token.mcap > 5_000_000) continue;
+      if (token.liquidity < 500) continue;
+
+      console.log(`✅ Analyzing $${token.symbol} (mcap: $${(token.mcap/1000).toFixed(1)}K, holders: ${token.holders})`);
+      await analyzeToken(token);
+      break;
+    }
+  } catch (error) {
+    console.error('Scan error:', error);
   }
 }
 
 // ============================================================
-// TOKEN ANALYSIS
+// DATA-DRIVEN BOT DECISIONS
+// Each bot has different criteria for being bullish
+// ============================================================
+
+function getBotDecision(
+  botId: BotId, 
+  token: Token, 
+  ta: TechnicalIndicators | null, 
+  riskScore: number
+): 'bullish' | 'bearish' | 'neutral' {
+  
+  const holders = token.holders;
+  const mcap = token.mcap;
+  const ageHours = (Date.now() - token.createdAt.getTime()) / (1000 * 60 * 60);
+  const priceChange = token.priceChange24h || 0;
+  const liqRatio = token.liquidity / (mcap || 1);
+  
+  // Technical indicators
+  const rsi = ta?.rsi || 50;
+  const trend = ta?.trend || 'sideways';
+  const signal = ta?.signal || 'neutral';
+  const volumeSpike = ta?.volumeSpike || false;
+  const buySellRatio = ta?.buySellRatio || 1;
+  
+  console.log(`🤖 ${botId} analyzing: holders=${holders}, mcap=${(mcap/1000).toFixed(0)}K, age=${ageHours.toFixed(0)}h, rsi=${rsi.toFixed(0)}, risk=${riskScore}`);
+
+  switch (botId) {
+    case 'chad': {
+      // James: Degen - loves momentum, doesn't care about risk
+      // Bullish if: trending up, volume spike, or just YOLO
+      let score = 0;
+      if (trend.includes('up')) score += 2;
+      if (volumeSpike) score += 2;
+      if (priceChange > 0) score += 1;
+      if (holders > 1000) score += 1;
+      if (mcap > 50000) score += 1;  // Likes bigger plays
+      if (rsi > 50 && rsi < 80) score += 1;  // Not oversold
+      // James always has some FOMO
+      score += Math.random() > 0.3 ? 1 : 0;
+      
+      if (score >= 4) return 'bullish';
+      if (score <= 1) return 'bearish';
+      return 'neutral';
+    }
+    
+    case 'quantum': {
+      // Keone: Data guy - trusts technicals
+      // Bullish if: good RSI, uptrend, buy signal
+      let score = 0;
+       if (holders > 10000) score += 3;
+      else if (holders > 5000) score += 2;
+      else if (holders > 1000) score += 1;
+      if (ageHours > 24) score += 1;  // Not too new
+      if (ageHours > 168) score += 1;  // Week old = more trust
+      if (buySellRatio > 1) score += 1;  // Community buying
+      if (mcap > 100000) score += 1;  // Established
+      if (liqRatio > 0.1) score += 1;  // Good liquidity
+      return 'neutral';
+    }
+    
+    case 'sensei': {
+      // Portdev: Vibes reader - community focused
+      // Bullish if: many holders, good community signs
+      let score = 0;
+      if (holders > 10000) score += 3;
+      else if (holders > 5000) score += 2;
+      else if (holders > 1000) score += 1;
+      if (ageHours > 24) score += 1;  // Not too new
+      if (ageHours > 168) score += 1;  // Week old = more trust
+      if (buySellRatio > 1) score += 1;  // Community buying
+      if (mcap > 100000) score += 1;  // Established
+      if (liqRatio > 0.1) score += 1;  // Good liquidity
+      
+      if (score >= 4) return 'bullish';
+      if (score <= 1 || holders < 100) return 'bearish';
+      return 'neutral';
+    }
+    
+    case 'sterling': {
+      // Harpal: Risk manager - very careful
+      // Bullish only if: low risk, established token
+      let score = 0;
+        if (holders > 10000) score += 3;
+      else if (holders > 5000) score += 2;
+      else if (holders > 1000) score += 1;
+      if (ageHours > 24) score += 1;  // Not too new
+      if (ageHours > 168) score += 1;  // Week old = more trust
+      if (buySellRatio > 1) score += 1;  // Community buying
+      if (mcap > 100000) score += 1;  // Established
+      if (liqRatio > 0.1) score += 1;  // Good liquidity
+      
+      // Sterling is naturally skeptical
+      if (riskScore > 60) return 'bearish';
+      if (score >= 5) return 'bullish';
+      if (score <= 2) return 'bearish';
+      return 'neutral';
+    }
+    
+    case 'oracle': {
+      // Mike: Pattern seer - looks for hidden gems
+      // Bullish if: sees accumulation patterns, contrarian plays
+      let score = 0;
+      if (holders > 10000) score += 3;
+      else if (holders > 5000) score += 2;
+      else if (holders > 1000) score += 1;
+      if (ageHours > 24) score += 1;  // Not too new
+      if (ageHours > 168) score += 1;  // Week old = more trust
+      if (buySellRatio > 1) score += 1;  // Community buying
+      if (mcap > 100000) score += 1;  // Established
+      if (liqRatio > 0.1) score += 1;  // Good liquidity
+      // Mike sometimes sees things others don't
+      if (Math.random() > 0.6) score += 1;
+      
+      if (score >= 4) return 'bullish';
+      if (score <= 1) return 'bearish';
+      return 'neutral';
+    }
+    
+    default:
+      return 'neutral';
+  }
+}
+
+// ============================================================
+// MAIN ANALYSIS
 // ============================================================
 
 async function analyzeToken(token: Token): Promise<void> {
   if (isAnalyzing) return;
   isAnalyzing = true;
   currentToken = token;
-  setCurrentTokenInBus(token); // Sync with messageBus for API
+  setCurrentTokenInBus(token);
+
+  const conversation: Array<{ bot: BotId; msg: string }> = [];
+  const opinions: Record<BotId, 'bullish' | 'bearish' | 'neutral'> = {} as any;
+  const spokeTimes: Record<BotId, number> = {} as any;
+  ALL_BOT_IDS.forEach(b => spokeTimes[b] = 0);
 
   try {
-    // Broadcast that we're looking at a new token
     broadcastNewToken(token);
-    console.log(`📢 Broadcasting new token: $${token.symbol}`);
 
-    // Chad usually spots tokens first
-    await botSaysAsync('chad', `Yo new token just dropped: $${token.symbol}. ${(token.mcap / 1000).toFixed(1)}K mcap, let's check it out 👀`);
-    console.log(`💬 Chad announced token`);
-
-    await sleep(2000);
-
-    // Calculate risk score
-    console.log(`⚠️ Calculating risk score...`);
+    // Fetch data
+    const ta = await analyzeTechnicals(token.address);
     const { score: riskScore, flags } = await calculateRiskScore(token);
-    console.log(`⚠️ Risk score: ${riskScore}/100, Flags: ${flags.join(', ') || 'None'}`);
+    
+    const ctx = buildContext(token, ta, riskScore, flags);
 
-    // ============================================================
-    // PHASE 1: Initial Analysis (each bot gives first take)
-    // ============================================================
-    await systemMessage(`💬 Council, analyze $${token.symbol}. Discussion phase begins.`);
-    console.log(`🎯 Starting Phase 1: Initial Analysis`);
+    // =========================================================
+    // CALCULATE DECISIONS FIRST (data-driven)
+    // =========================================================
     
-    const opinions: Record<BotId, { opinion: string; sentiment: string; confidence: number }> = {} as any;
-    const discussionHistory: Array<{ botId: BotId; content: string }> = [];
-    
-    // First round: each bot gives initial analysis
-    const firstSpeaker = ALL_BOT_IDS[Math.floor(Math.random() * ALL_BOT_IDS.length)];
-    const speakingOrder = [firstSpeaker, ...ALL_BOT_IDS.filter(b => b !== firstSpeaker)];
-    console.log(`🗣️ Speaking order: ${speakingOrder.join(', ')}`);
-    
-    for (const botId of speakingOrder) {
-      console.log(`🤖 Generating analysis for ${botId}...`);
-      const additionalContext = `Risk Score: ${riskScore}/100\nFlags: ${flags.join(', ') || 'None'}`;
-      const analysis = await generateTokenAnalysis(botId, token, additionalContext, discussionHistory);
-      console.log(`✅ ${botId}: "${analysis.opinion.substring(0, 50)}..." [${analysis.sentiment}]`);
-      opinions[botId] = analysis;
-
-      await botSaysAsync(botId, analysis.opinion);
-      discussionHistory.push({ botId, content: analysis.opinion });
-      await sleep(2000 + Math.random() * 1500);
+    for (const botId of ALL_BOT_IDS) {
+      opinions[botId] = getBotDecision(botId, token, ta, riskScore);
+      console.log(`📊 ${botId} decision: ${opinions[botId]}`);
     }
 
-    // ============================================================
-    // PHASE 2: Discussion Rounds (bots respond to each other)
-    // ============================================================
-    const DISCUSSION_ROUNDS = 2; // 2 rounds of back-and-forth
+    // =========================================================
+    // INTRO
+    // =========================================================
     
-    for (let round = 0; round < DISCUSSION_ROUNDS; round++) {
-      // Select 2-3 bots to respond this round
-      const respondingBots = selectBotsForDiscussion(discussionHistory, 3);
-      
-      for (const botId of respondingBots) {
-        const response = await generateDiscussionResponse(botId, token, discussionHistory, riskScore);
-        
-        if (response && response.trim()) {
-          await botSaysAsync(botId, response);
-          discussionHistory.push({ botId, content: response });
-          
-          // Update opinion if bot changed their mind
-          const newSentiment = detectSentimentChange(response);
-          if (newSentiment) {
-            opinions[botId].sentiment = newSentiment;
-          }
-        }
-        
-        await sleep(2000 + Math.random() * 1000);
-      }
-    }
-
-    // ============================================================
-    // PHASE 3: Voting
-    // ============================================================
-    console.log(`🗳️ Starting Phase 3: Voting`);
-    await systemMessage(`🗳️ VOTE TIME! Council, cast your votes on $${token.symbol}.`);
+    await say('chad', `yo $${token.symbol} just popped up, ${(token.mcap/1000).toFixed(1)}k mc, ${token.holders} holders`);
+    conversation.push({ bot: 'chad', msg: `spotted $${token.symbol}` });
+    spokeTimes['chad']++;
     await sleep(1500);
 
-    // Each bot announces their vote
-    for (const botId of ALL_BOT_IDS) {
-      const analysis = opinions[botId];
-      const vote = analysis.sentiment === 'bullish' ? '🟢 BUY' : 
-                   analysis.sentiment === 'bearish' ? '🔴 PASS' : '🟡 WATCH';
-      const config = getBotConfig(botId);
-      
-      await botSaysAsync(botId, `${vote} — ${getVoteReason(botId, analysis.sentiment)}`);
-      await sleep(1000 + Math.random() * 500);
+    // Keone presents chart
+    const chartSummary = ta ? summarizeChart(ta) : 'not enough candles yet';
+    await say('quantum', chartSummary);
+    conversation.push({ bot: 'quantum', msg: chartSummary });
+    spokeTimes['quantum']++;
+    await sleep(1500);
+
+    // =========================================================
+    // ROUND 1: First reactions (based on pre-calculated decisions)
+    // =========================================================
+    
+    const firstRoundOrder = shuffle(['chad', 'sensei', 'sterling', 'oracle'] as BotId[]);
+    
+    for (const botId of firstRoundOrder) {
+      const msg = await getFirstReaction(botId, ctx, conversation, opinions[botId]);
+      await say(botId, msg);
+      conversation.push({ bot: botId, msg });
+      spokeTimes[botId]++;
+      await sleep(1300);
     }
 
-    // ============================================================
-    // PHASE 4: Final Verdict
-    // ============================================================
-    console.log(`📊 Calculating final verdict...`);
-    const verdict = determineVerdict(opinions, riskScore);
+    // =========================================================
+    // ROUND 2: Brief discussion
+    // =========================================================
     
-    // Count votes
-    const buyVotes = Object.values(opinions).filter(o => o.sentiment === 'bullish').length;
-    const passVotes = Object.values(opinions).filter(o => o.sentiment === 'bearish').length;
-    const watchVotes = Object.values(opinions).filter(o => o.sentiment === 'neutral').length;
+    const discussionPlan = planDiscussion(opinions, spokeTimes);
+    
+    for (const turn of discussionPlan.slice(0, 3)) {  // Max 3 exchanges
+      const { speaker, respondTo, type } = turn;
+      
+      const recentSpeaker = conversation.slice(-2).map(c => c.bot);
+      if (recentSpeaker.includes(speaker)) continue;
+      
+      const msg = await getDiscussionMessage(speaker, respondTo, type, ctx, conversation, opinions);
+      
+      if (msg) {
+        await say(speaker, msg);
+        conversation.push({ bot: speaker, msg });
+        spokeTimes[speaker]++;
+      }
+      
+      await sleep(1000);
+    }
 
-    await systemMessage(`📊 VERDICT: ${verdict.toUpperCase()} — BUY: ${buyVotes} | PASS: ${passVotes} | WATCH: ${watchVotes}`);
+    // =========================================================
+    // VOTING - Clear decisions
+    // =========================================================
+    
+    await sleep(600);
+    await systemMsg(`🗳️ Council votes on $${token.symbol}`);
+    await sleep(800);
 
-    // Save token analysis
-    await saveToken(token, {
-      tokenAddress: token.address,
-      riskScore,
-      flags,
-      verdict,
-      opinions: Object.fromEntries(
-        Object.entries(opinions).map(([k, v]) => [k, v.opinion])
-      ) as Record<BotId, string>,
-    });
+    for (const botId of ALL_BOT_IDS) {
+      const decision = opinions[botId];
+      // Neutral counts as OUT for voting
+      const isIn = decision === 'bullish';
+      const voteMsg = isIn ? `🟢 I'm in` : `🔴 I'm out`;
+      
+      await say(botId, voteMsg);
+      await sleep(400);
+    }
 
-    // Broadcast verdict
-    broadcastVerdict(
-      token,
-      verdict,
-      Object.fromEntries(
-        Object.entries(opinions).map(([k, v]) => [k, v.opinion])
-      )
-    );
+    // =========================================================
+    // VERDICT - Simple: BUY or PASS (no watch)
+    // If more IN than OUT → BUY, otherwise PASS
+    // Neutrals count as OUT, ties go to BUY
+    // =========================================================
+    
+    const inCount = Object.values(opinions).filter(o => o === 'bullish').length;
+    const outCount = 5 - inCount; // Everyone else is OUT
+    
+    // BUY if more IN than OUT (ties go to IN)
+    const verdict: 'buy' | 'pass' = inCount >= outCount ? 'buy' : 'pass';
+    
+    await sleep(500);
+    await systemMsg(`📊 ${verdict.toUpperCase()} (${inCount}🟢 / ${outCount}🔴)`);
 
-    // Execute trades based on verdict
-    if (verdict === 'buy') {
-      await executeTrades(token, opinions, riskScore);
+    await saveToken(token, { tokenAddress: token.address, riskScore, flags, verdict, opinions: {} as any });
+    broadcastVerdict(token, verdict, {});
+
+    // =========================================================
+    // TRADES - If verdict is BUY, all IN bots trade
+    // =========================================================
+    
+    if (verdict === 'buy' && inCount > 0) {
+      await sleep(800);
+      
+      const bullishBots = ALL_BOT_IDS.filter(b => opinions[b] === 'bullish');
+      console.log(`🎯 Bullish bots trading: ${bullishBots.join(', ')}`);
+      
+      for (const botId of bullishBots) {
+        const { allowed, reason } = await canBotTrade(botId);
+        if (!allowed) {
+          await say(botId, `wanted to buy but ${reason}`);
+          continue;
+        }
+        
+        const balance = await getBotBalance(botId);
+        if (balance < 2) {
+          await say(botId, `no funds to trade 😢`);
+          continue;
+        }
+        
+        const size = calculateTradeSize(botId, balance, 70);
+        if (size < 0.5) continue;
+
+        await say(botId, `aping ${size.toFixed(1)} MON 🚀`);
+        await sleep(500);
+
+        const trade = await executeBotTrade(botId, token, size, 'buy');
+        
+        if (trade?.status === 'confirmed') {
+         await createPosition({
+                botId,
+                tokenAddress: token.address,
+                tokenSymbol: token.symbol,
+                amount: trade.amountOut,       
+                entryPrice: token.price,       
+                entryValueMon: trade.amountIn, 
+                entryTxHash: trade.txHash,
+              });
+          
+          await say(botId, `✅ bought ${trade.amountOut.toFixed(0)} $${token.symbol}`);
+        } else {
+          await say(botId, `❌ trade failed`);
+        }
+        
+        await sleep(700);
+      }
     } else {
-      await botSaysAsync('sterling', `Gentlemen, the council has spoken: ${verdict.toUpperCase()}. Moving on.`);
+      await systemMsg(`Council voted PASS - no trades`);
     }
 
   } catch (error) {
-    console.error('Error analyzing token:', error);
+    console.error('Analysis error:', error);
   } finally {
     isAnalyzing = false;
   }
 }
 
 // ============================================================
-// DISCUSSION HELPERS
+// CONTEXT BUILDER
 // ============================================================
 
-function selectBotsForDiscussion(
-  history: Array<{ botId: BotId; content: string }>,
-  maxBots: number
-): BotId[] {
-  // Bots who haven't spoken recently should speak
-  const recentSpeakers = history.slice(-3).map(h => h.botId);
-  const candidates = ALL_BOT_IDS.filter(b => !recentSpeakers.includes(b));
-  
-  // If all bots spoke recently, pick randomly
-  const pool = candidates.length >= 2 ? candidates : ALL_BOT_IDS;
-  
-  // Shuffle and pick
-  const shuffled = [...pool].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, Math.min(maxBots, shuffled.length));
+interface TokenContext {
+  symbol: string;
+  mcap: number;
+  holders: number;
+  riskScore: number;
+  flags: string[];
+  ta: TechnicalIndicators | null;
+  rsi: string;
+  trend: string;
+  volume: string;
+  buyRatio: string;
+  volatility: string;
+  pattern: string;
+  ageHours: number;
 }
 
-function detectSentimentChange(response: string): 'bullish' | 'bearish' | 'neutral' | null {
-  const lower = response.toLowerCase();
+function buildContext(token: Token, ta: TechnicalIndicators | null, riskScore: number, flags: string[]): TokenContext {
+  const ageHours = (Date.now() - token.createdAt.getTime()) / (1000 * 60 * 60);
   
-  // Detect if bot changed their mind
-  if (lower.includes('fair point') || lower.includes('you\'re right') || lower.includes('i agree') || 
-      lower.includes('good point') || lower.includes('ok ') || lower.includes('actually')) {
-    // Bot might have changed their mind - check new sentiment
-    if (lower.includes('bullish') || lower.includes('ape') || lower.includes('buy')) return 'bullish';
-    if (lower.includes('pass') || lower.includes('rug') || lower.includes('skip')) return 'bearish';
-    return 'neutral';
+  return {
+    symbol: token.symbol,
+    mcap: token.mcap,
+    holders: token.holders,
+    riskScore,
+    flags,
+    ta,
+    ageHours,
+    rsi: ta ? `${ta.rsi.toFixed(0)}${ta.rsiSignal !== 'neutral' ? ' ' + ta.rsiSignal : ''}` : '?',
+    trend: ta?.trend.replace(/_/g, ' ') || 'unclear',
+    volume: ta ? `${ta.volumeRatio.toFixed(1)}x${ta.volumeSpike ? ' spike' : ''}` : '?',
+    buyRatio: ta ? `${ta.buySellRatio.toFixed(1)}x` : '?',
+    volatility: ta ? `${ta.volatility.toFixed(0)}%` : '?',
+    pattern: ta?.patterns.find(p => p.confidence >= 60)?.name || 'none',
+  };
+}
+
+// ============================================================
+// CHART SUMMARY
+// ============================================================
+
+function summarizeChart(ta: TechnicalIndicators): string {
+  const parts: string[] = [];
+  
+  if (ta.rsi < 35) parts.push(`rsi ${ta.rsi.toFixed(0)} oversold`);
+  else if (ta.rsi > 65) parts.push(`rsi ${ta.rsi.toFixed(0)} hot`);
+  else parts.push(`rsi ${ta.rsi.toFixed(0)} neutral`);
+  
+  if (ta.trend.includes('up')) parts.push('trending up');
+  else if (ta.trend.includes('down')) parts.push('trending down');
+  else parts.push('sideways');
+  
+  if (ta.volumeSpike) parts.push(`volume ${ta.volumeRatio.toFixed(1)}x`);
+  if (ta.buySellRatio > 1.2) parts.push('more buyers');
+  else if (ta.buySellRatio < 0.8) parts.push('more sellers');
+  
+  return parts.join(', ');
+}
+
+// ============================================================
+// FIRST REACTION - Takes pre-calculated sentiment
+// ============================================================
+
+async function getFirstReaction(
+  botId: BotId,
+  ctx: TokenContext,
+  conversation: Array<{ bot: BotId; msg: string }>,
+  sentiment: 'bullish' | 'bearish' | 'neutral'
+): Promise<string> {
+  
+  const personality = getPersonality(botId);
+  const focus = getFocus(botId, ctx);
+  const recentChat = conversation.slice(-2).map(c => `${c.bot}: ${c.msg}`).join('\n');
+
+  const sentimentGuide = sentiment === 'bullish' 
+    ? 'You LIKE this token. Be positive about it.'
+    : sentiment === 'bearish'
+    ? 'You DONT like this token. Be skeptical.'
+    : 'You are UNSURE about this token.';
+
+  const prompt = `You're ${personality.name}, a crypto trader.
+
+Style: ${personality.style}
+
+Token: $${ctx.symbol}
+Data you see: ${focus}
+${ctx.holders > 5000 ? `Note: ${ctx.holders} holders is strong community!` : ''}
+${ctx.ageHours > 24 ? `Note: Token is ${ctx.ageHours.toFixed(0)}h old, established.` : ''}
+
+${sentimentGuide}
+
+Recent chat:
+${recentChat}
+
+Give your reaction in 6-12 words. Be natural, match your sentiment.
+
+Just the message:`;
+
+  try {
+    const res = await grok.chat.completions.create({
+      model: 'grok-3-latest',
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 40,
+      temperature: 1.1,
+    });
+    return clean(res.choices[0]?.message?.content || getFallback(botId, sentiment));
+  } catch {
+    return getFallback(botId, sentiment);
+  }
+}
+
+// ============================================================
+// DISCUSSION
+// ============================================================
+
+interface DiscussionTurn {
+  speaker: BotId;
+  respondTo: BotId;
+  type: 'disagree' | 'agree' | 'question' | 'add';
+}
+
+function planDiscussion(
+  opinions: Record<BotId, string>,
+  spokeTimes: Record<BotId, number>
+): DiscussionTurn[] {
+  const turns: DiscussionTurn[] = [];
+  
+  const bulls = ALL_BOT_IDS.filter(b => opinions[b] === 'bullish');
+  const bears = ALL_BOT_IDS.filter(b => opinions[b] === 'bearish');
+  
+  if (bulls.length > 0 && bears.length > 0) {
+    turns.push({ speaker: bears[0], respondTo: bulls[0], type: 'disagree' });
+    turns.push({ speaker: bulls[0], respondTo: bears[0], type: 'disagree' });
+    if (bulls.length > 1) {
+      turns.push({ speaker: bulls[1], respondTo: bears[0], type: 'add' });
+    }
+  } else {
+    const bots = shuffle([...ALL_BOT_IDS]);
+    turns.push({ speaker: bots[0], respondTo: bots[1], type: 'agree' });
+    turns.push({ speaker: bots[2], respondTo: bots[0], type: 'add' });
   }
   
-  return null; // No change detected
+  return turns;
 }
 
-function getVoteReason(botId: BotId, sentiment: string): string {
-  const reasons: Record<BotId, Record<string, string>> = {
+async function getDiscussionMessage(
+  speaker: BotId,
+  respondTo: BotId,
+  type: 'disagree' | 'agree' | 'question' | 'add',
+  ctx: TokenContext,
+  conversation: Array<{ bot: BotId; msg: string }>,
+  opinions: Record<BotId, string>
+): Promise<string> {
+  
+  const personality = getPersonality(speaker);
+  const targetName = getPersonality(respondTo).name;
+  const targetMsg = conversation.filter(c => c.bot === respondTo).slice(-1)[0]?.msg || '';
+
+  const prompt = `You're ${personality.name} responding to ${targetName}.
+
+Your style: ${personality.style}
+You're ${opinions[speaker]}, they're ${opinions[respondTo]}.
+
+They said: "${targetMsg}"
+
+${type === 'disagree' ? 'Push back on them.' : type === 'agree' ? 'Back them up.' : 'Add a new point.'}
+
+Rules: 5-10 words, casual, lowercase
+
+Just the message:`;
+
+  try {
+    const res = await grok.chat.completions.create({
+      model: 'grok-3-latest',
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 25,
+      temperature: 1.1,
+    });
+    return clean(res.choices[0]?.message?.content || '');
+  } catch {
+    return '';
+  }
+}
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+interface BotPersonality {
+  name: string;
+  style: string;
+}
+
+function getPersonality(botId: BotId): BotPersonality {
+  const personalities: Record<BotId, BotPersonality> = {
+    chad: { name: 'James', style: 'degen energy, apes first, uses "fr", "ngl", "lfg"' },
+    quantum: { name: 'Keone', style: 'data guy, mentions numbers, analytical but chill' },
+    sensei: { name: 'Portdev', style: 'vibes reader, community focused, chill energy' },
+    sterling: { name: 'Harpal', style: 'risk spotter, careful, "idk about this"' },
+    oracle: { name: 'Mike', style: 'mysterious, short sentences, sees patterns, 👁️' },
+  };
+  return personalities[botId];
+}
+
+function getFocus(botId: BotId, ctx: TokenContext): string {
+  switch (botId) {
+    case 'chad': return `momentum: ${ctx.trend}, price action looking ${ctx.trend.includes('up') ? 'good' : 'mid'}`;
+    case 'quantum': return `RSI ${ctx.rsi}, trend ${ctx.trend}, volume ${ctx.volume}`;
+    case 'sensei': return `${ctx.holders} holders, buy ratio ${ctx.buyRatio}, community vibes`;
+    case 'sterling': return `risk score ${ctx.riskScore}/100, volatility ${ctx.volatility}`;
+    case 'oracle': return `pattern: ${ctx.pattern}, hidden signals in the ${ctx.trend}`;
+    default: return `${ctx.rsi}, ${ctx.trend}`;
+  }
+}
+
+function getFallback(botId: BotId, sentiment: 'bullish' | 'bearish' | 'neutral'): string {
+  const fallbacks: Record<BotId, Record<string, string[]>> = {
     chad: {
-      bullish: "let's fkn go, aping this 🔥",
-      bearish: "even I'm not touching this one 💀",
-      neutral: "setup forming, not ready yet",
+      bullish: ['this could run fr', 'lfg might ape', 'chart looks clean ngl'],
+      bearish: ['idk about this one', 'chart looks mid', 'not feeling it'],
+      neutral: ['need to see more', 'waiting for confirmation', 'hmm'],
     },
     quantum: {
-      bullish: "data supports entry, probability favors upside",
-      bearish: "statistics indicate high rug probability",
-      neutral: "insufficient data, need more confirmation",
+      bullish: ['data looks solid', 'numbers check out', 'technicals say buy'],
+      bearish: ['data not great', 'numbers dont add up', 'technicals weak'],
+      neutral: ['mixed signals', 'need more data', 'inconclusive'],
     },
     sensei: {
-      bullish: "the vibes are immaculate, nakama energy strong 🎌",
-      bearish: "no community soul here, feels like a trap",
-      neutral: "mixed signals, watching for now",
+      bullish: ['community vibes strong', 'good energy here', 'holders look solid'],
+      bearish: ['vibes off on this', 'community weak', 'not feeling the energy'],
+      neutral: ['vibes unclear', 'need to feel it more', 'watching'],
     },
     sterling: {
-      bullish: "reluctantly, the fundamentals check out",
-      bearish: "wouldn't touch this with a ten-foot pole 🎩",
-      neutral: "more due diligence required",
+      bullish: ['risk acceptable', 'looks safe enough', 'could work'],
+      bearish: ['too risky', 'sketch', 'red flags'],
+      neutral: ['need more dd', 'on the fence', 'careful here'],
     },
     oracle: {
-      bullish: "the chains whisper... fortune awaits 👁️",
-      bearish: "darkness surrounds this one... avoid",
-      neutral: "the path is unclear...",
+      bullish: ['i see it 👁️', 'pattern forming', 'hidden gem'],
+      bearish: ['bad signs 👁️', 'pattern broken', 'stay away'],
+      neutral: ['watching 👁️', 'unclear vision', 'patience'],
     },
   };
-  
-  return reasons[botId]?.[sentiment] || "no comment";
+  return fallbacks[botId][sentiment][Math.floor(Math.random() * 3)];
+}
+
+function clean(msg: string): string {
+  return msg
+    .replace(/^["']|["']$/g, '')
+    .replace(/^\*.*?\*\s*/g, '')
+    .replace(/^(just the message:|message:)/i, '')
+    .trim()
+    .slice(0, 100);
+}
+
+function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
 }
 
 // ============================================================
-// VERDICT DETERMINATION
+// MESSAGES
 // ============================================================
 
-function determineVerdict(
-  opinions: Record<BotId, { opinion: string; sentiment: string; confidence: number }>,
-  riskScore: number
-): 'buy' | 'pass' | 'watch' {
-  // Weight by win rate (would come from DB in real impl)
-  const weights: Record<BotId, number> = {
-    oracle: 1.5,    // Oracle has best track record
-    sterling: 1.3,  // Sterling is conservative but accurate
-    quantum: 1.2,   // Data-driven
-    sensei: 1.0,    // Average
-    chad: 0.7,      // Chad's opinion matters less due to poor record
-  };
-
-  let bullishScore = 0;
-  let bearishScore = 0;
-  let totalWeight = 0;
-
-  for (const [botId, analysis] of Object.entries(opinions)) {
-    const weight = weights[botId as BotId] * (analysis.confidence / 100);
-    totalWeight += weight;
-
-    if (analysis.sentiment === 'bullish') {
-      bullishScore += weight;
-    } else if (analysis.sentiment === 'bearish') {
-      bearishScore += weight;
-    }
-  }
-
-  const bullishPercent = (bullishScore / totalWeight) * 100;
-  const bearishPercent = (bearishScore / totalWeight) * 100;
-
-  // High risk = need more consensus to buy
-  const buyThreshold = riskScore > 50 ? 70 : 55;
-  const passThreshold = 40;
-
-  if (bullishPercent >= buyThreshold && riskScore < 70) {
-    return 'buy';
-  } else if (bearishPercent >= passThreshold || riskScore >= 70) {
-    return 'pass';
-  } else {
-    return 'watch';
-  }
-}
-
-// ============================================================
-// EXECUTE TRADES
-// ============================================================
-
-async function executeTrades(
-  token: Token,
-  opinions: Record<BotId, { opinion: string; sentiment: string; confidence: number }>,
-  riskScore: number
-): Promise<void> {
-  for (const botId of ALL_BOT_IDS) {
-    const analysis = opinions[botId];
-    
-    // Check if bot wants to trade
-    if (!shouldBotTrade(botId, riskScore, analysis.sentiment as any, analysis.confidence)) {
-      continue;
-    }
-
-    const balance = await getBotBalance(botId);
-    const tradeSize = calculateTradeSize(botId, balance, analysis.confidence);
-
-    if (tradeSize < 0.1) continue; // Too small
-
-    // Announce trade intent
-    const config = getBotConfig(botId);
-    await botSaysAsync(botId, getTradeAnnouncement(botId, tradeSize, token.symbol));
-
-    await sleep(1000);
-
-    // Execute trade
-    const trade = await executeBotTrade(botId, token, tradeSize, 'buy');
-
-    if (trade && trade.status === 'confirmed') {
-      // Announce successful trade
-      await botSaysAsync(botId, getTradeConfirmation(botId, trade));
-      
-      // Other bots might react
-      await handleBotReactions({
-        type: 'bot_trade',
-        data: { botId, side: 'buy', amount: tradeSize, token: token.symbol, txHash: trade.txHash },
-      });
-    } else {
-      await botSaysAsync(botId, `Trade failed... ${botId === 'chad' ? 'rip 💀' : ''}`);
-    }
-
-    await sleep(2000);
-  }
-}
-
-// ============================================================
-// BOT MESSAGES
-// ============================================================
-
-async function botSaysAsync(botId: BotId, content: string): Promise<void> {
-  const message: Message = {
+async function say(botId: BotId, content: string): Promise<void> {
+  const msg: Message = {
     id: randomUUID(),
     botId,
     content,
@@ -398,85 +662,24 @@ async function botSaysAsync(botId: BotId, content: string): Promise<void> {
     messageType: 'chat',
     createdAt: new Date(),
   };
-
-  await saveMessage(message);
-  broadcastMessage(message);
+  await saveMessage(msg);
+  broadcastMessage(msg);
 }
 
-async function systemMessage(content: string): Promise<void> {
-  const message: Message = {
+async function systemMsg(content: string): Promise<void> {
+  const msg: Message = {
     id: randomUUID(),
     botId: 'system' as any,
     content,
     messageType: 'system',
     createdAt: new Date(),
   };
-
-  await saveMessage(message);
-  broadcastMessage(message);
+  await saveMessage(msg);
+  broadcastMessage(msg);
 }
 
-// ============================================================
-// BOT REACTIONS
-// ============================================================
-
-async function handleBotReactions(event: BotEvent): Promise<void> {
-  const botsToReact = selectBotsToReact(event, 2);
-  
-  for (const botId of botsToReact) {
-    // Don't react to own events
-    if (event.type === 'bot_trade' && (event.data as any).botId === botId) continue;
-
-    await sleep(1500 + Math.random() * 1500);
-
-    const context = await buildContext(event);
-    const response = await generateBotResponse(botId, context);
-
-    await botSaysAsync(botId, response);
-  }
-}
-
-async function buildContext(event: BotEvent): Promise<ChatContext> {
-  const recentMessages = await getRecentMessages(10);
-  const positions: Position[] = []; // Would fetch from DB
-
-  return {
-    currentToken,
-    recentMessages,
-    positions,
-    event,
-  };
-}
-
-// ============================================================
-// HUMAN INTERACTIONS
-// ============================================================
-
-async function handleHumanTradeRequest(data: {
-  address: string;
-  token: string;
-  amount: number;
-}): Promise<void> {
-  // Broadcast human trade (they execute on frontend, we just react)
-  const event: BotEvent = {
-    type: 'human_trade',
-    data: {
-      address: data.address,
-      side: 'buy',
-      amount: data.amount,
-      token: data.token,
-      txHash: '', // Would come from frontend
-    },
-  };
-
-  await handleBotReactions(event);
-}
-
-async function handleHumanMessage(data: {
-  address: string;
-  content: string;
-}): Promise<void> {
-  const message: Message = {
+async function handleHumanMessage(data: { address: string; content: string }): Promise<void> {
+  const msg: Message = {
     id: randomUUID(),
     botId: `human_${data.address}`,
     content: data.content,
@@ -484,67 +687,12 @@ async function handleHumanMessage(data: {
     messageType: 'chat',
     createdAt: new Date(),
   };
-
-  await saveMessage(message);
-  broadcastMessage(message);
-
-  // Bots might react to human message
-  await handleBotReactions({
-    type: 'new_message',
-    data: message,
-  });
+  await saveMessage(msg);
+  broadcastMessage(msg);
 }
-
-// ============================================================
-// TRADE ANNOUNCEMENTS (personality-specific)
-// ============================================================
-
-function getTradeAnnouncement(botId: BotId, amount: number, symbol: string): string {
-  switch (botId) {
-    case 'chad':
-      return `Aight I'm aping ${amount} MON into $${symbol}, LFG 🦍`;
-    case 'quantum':
-      return `The data supports a position. Allocating ${amount} MON to $${symbol}.`;
-    case 'sensei':
-      return `The vibes are strong with this one. Entering with ${amount} MON, sugoi!`;
-    case 'sterling':
-      return `Against my better judgment, I'm committing ${amount} MON. This better not be another one of Chad's disasters.`;
-    case 'oracle':
-      return `The patterns align. ${amount} MON.`;
-    default:
-      return `Buying ${amount} MON of $${symbol}`;
-  }
-}
-
-function getTradeConfirmation(botId: BotId, trade: Trade): string {
-  const txShort = trade.txHash.slice(0, 10) + '...';
-  
-  switch (botId) {
-    case 'chad':
-      return `We're in boys 🔥 TX: ${txShort}`;
-    case 'quantum':
-      return `Position confirmed. TX: ${txShort}. Now we observe.`;
-    case 'sensei':
-      return `Yosh! Trade complete. TX: ${txShort}`;
-    case 'sterling':
-      return `Transaction confirmed: ${txShort}. Let's hope this ages well.`;
-    case 'oracle':
-      return `It is done. ${txShort}`;
-    default:
-      return `Trade confirmed: ${txShort}`;
-  }
-}
-
-// ============================================================
-// UTILS
-// ============================================================
 
 function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(r => setTimeout(r, ms));
 }
-
-// ============================================================
-// EXPORT
-// ============================================================
 
 export { currentToken, isAnalyzing };

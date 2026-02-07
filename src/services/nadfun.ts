@@ -20,13 +20,13 @@ import type { Token } from '../types/index.js';
 // CONFIG
 // ============================================================
 
-const NETWORK = (process.env.MONAD_NETWORK || 'testnet') as 'testnet' | 'mainnet';
+const NETWORK = (process.env.MONAD_NETWORK || 'mainnet') as 'testnet' | 'mainnet';
 
 const CONFIG = {
   testnet: {
     chainId: 10143,
     rpcUrl: 'https://monad-testnet.drpc.org',
-    apiUrl: 'https://dev-api.nad.fun',
+    apiUrl: 'https://api.nadapp.net',
     BONDING_CURVE_ROUTER: '0x865054F0F6A288adaAc30261731361EA7E908003' as `0x${string}`,
     DEX_ROUTER: '0x5D4a4f430cA3B1b2dB86B9cFE48a5316800F5fb2' as `0x${string}`,
     LENS: '0xB056d79CA5257589692699a46623F901a3BB76f1' as `0x${string}`,
@@ -653,10 +653,12 @@ export async function getNewTokens(limit: number = 10): Promise<Token[]> {
   try {
     console.log(`🔍 Fetching new tokens from nad.fun API...`);
     
-    const url = `${CONFIG.apiUrl}/order/market_cap?page=1&limit=${limit * 3}&is_nsfw=false`;
+    const url = `${CONFIG.apiUrl}/order/market_cap?page=1&limit=${limit}&direction=DESC&is_nsfw=false`;
     console.log(`📡 GET ${url}`);
+
     
     const res = await fetch(url, { headers });
+
     
     if (!res.ok) {
       console.error(`API error: ${res.status}`);
@@ -664,7 +666,7 @@ export async function getNewTokens(limit: number = 10): Promise<Token[]> {
     }
     
     const data = await res.json();
-    
+        console.log("data",data.tokens[0]);
     if (!data?.tokens || data.tokens.length === 0) {
       console.log('📭 No tokens returned from API');
       return [];
@@ -882,6 +884,7 @@ export function createBotWalletClient(privateKey: `0x${string}`): WalletClient {
 }
 
 export async function getWalletBalance(address: `0x${string}`): Promise<bigint> {
+  console.log("address",address);
   return publicClient.getBalance({ address });
 }
 
@@ -895,4 +898,28 @@ export async function getTokenBalance(
     functionName: 'balanceOf',
     args: [walletAddress],
   });
+}
+
+// ============================================================
+// GET TOKEN PRICE
+// ============================================================
+
+export async function getTokenPrice(tokenAddress: string): Promise<number | null> {
+  try {
+    const marketData = await getMarketData(tokenAddress);
+    if (marketData && marketData.price) {
+      return marketData.price;
+    }
+    
+    // Fallback: try getTokenInfo
+    const tokenInfo = await getTokenInfo(tokenAddress);
+    if (tokenInfo && tokenInfo.price) {
+      return tokenInfo.price;
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error getting token price:', error);
+    return null;
+  }
 }

@@ -154,3 +154,105 @@ export interface ChatContext {
   positions: Position[];
   event: BotEvent;
 }
+
+// ============================================================
+// TYPES — Shared types for frontend
+// ============================================================
+
+export type BotId = 'chad' | 'quantum' | 'sensei' | 'sterling' | 'oracle';
+
+export interface Token {
+  address: string;
+  symbol: string;
+  name: string;
+  price: number;
+  priceChange24h: number;
+  mcap: number;
+  liquidity: number;
+  holders: number;
+  deployer: string;
+  createdAt: Date;
+}
+
+export interface Message {
+  id: string;
+  botId: BotId;
+  content: string;
+  token?: string;
+  messageType: 'chat' | 'trade' | 'verdict' | 'reaction' | 'system';
+  createdAt: Date | string;
+}
+
+export interface Trade {
+  id: string;
+  botId: BotId;
+  tokenAddress: string;
+  tokenSymbol: string;
+  side: 'buy' | 'sell';
+  amountIn: number;
+  amountOut: number;
+  price: number;
+  txHash: string;
+  status: 'pending' | 'confirmed' | 'failed';
+  pnl?: number;
+  createdAt: Date | string;
+}
+
+// ============================================================
+// POSITIONS — Bot holdings with live PnL
+// ============================================================
+
+export interface BotPosition {
+  id: string;
+  botId: BotId | `human_${string}`;
+  tokenAddress: string;
+  tokenSymbol: string;
+  amount: number;
+  entryPrice: number;
+  currentPrice: number;
+  totalInvested: number;
+  currentValue: number;
+  pnl: number;
+  pnlPercent: number;
+  isOpen: boolean;
+  createdAt: Date;
+}
+
+export interface BotPortfolio {
+  botId: BotId | `human_${string}`;
+  name: string;
+  positions: BotPosition[];
+  totalInvested: number;
+  totalValue: number;
+  totalPnl: number;
+  totalPnlPercent: number;
+  openPositions: number;
+}
+
+// ============================================================
+// STATS
+// ============================================================
+
+export interface BotStats {
+  botId: BotId | `human_${string}`;
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  totalPnl: number;
+  currentStreak: number;
+  bestStreak: number;
+}
+
+export interface Verdict {
+  token: Token;
+  verdict: 'buy' | 'pass' | 'watch';
+  opinions: Record<BotId, string>;
+  timestamp: Date;
+}
+
+export interface WebSocketEvent {
+  type: 'connected' | 'new_token' | 'message' | 'trade' | 'verdict' | 'positions_update';
+  data: unknown;
+  timestamp: string;
+}

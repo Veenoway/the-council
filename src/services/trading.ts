@@ -15,6 +15,7 @@ import {
   publicClient,
 } from './nadfun.js';
 import { randomUUID } from 'crypto';
+import { privateKeyToAccount } from 'viem/accounts';
 
 // Bot wallets (loaded from env)
 interface BotWallet {
@@ -24,12 +25,28 @@ interface BotWallet {
 
 function getBotWallet(botId: BotId): BotWallet | null {
   const prefix = botId.toUpperCase();
-  const address = process.env[`${prefix}_WALLET_ADDRESS`] as `0x${string}` | undefined;
-  const privateKey = process.env[`${prefix}_WALLET_PRIVATE_KEY`] as `0x${string}` | undefined;
   
-  if (!address || !privateKey) return null;
+  // Try bot-specific key first
+  let privateKey = process.env[`${prefix}_WALLET_PRIVATE_KEY`] as `0x${string}` | undefined;
   
-  return { address, privateKey };
+  // Fallback to shared wallet for testing
+  if (!privateKey) {
+    privateKey = process.env.SHARED_WALLET_PRIVATE_KEY as `0x${string}` | undefined;
+  }
+  
+  if (!privateKey) {
+    console.log(`❌ No wallet for ${botId}`);
+    return null;
+  }
+  
+  try {
+    const account = privateKeyToAccount(privateKey);
+    console.log(`✅ ${botId} wallet: ${account.address}`);
+    return { address: account.address, privateKey };
+  } catch (error) {
+    console.error(`❌ Invalid private key for ${botId}`);
+    return null;
+  }
 }
 
 // ============================================================
@@ -134,6 +151,7 @@ export async function executeBotTrade(
 
   // Check balance
   const balance = await getBotBalance(botId);
+  console.log("balance",balance);
   if (side === 'buy' && balance < amountMON) {
     console.error(`${botId} has insufficient balance: ${balance} MON`);
     return null;
