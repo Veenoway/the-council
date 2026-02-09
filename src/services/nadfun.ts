@@ -1,5 +1,5 @@
 // ============================================================
-// NADFUN SERVICE — With cache and rate limiting
+// NADFUN SERVICE — Lazy loading with smart caching
 // ============================================================
 
 import { 
@@ -34,7 +34,7 @@ const CONFIG = {
   },
   mainnet: {
     chainId: 143,
-    rpcUrl: 'https://monad-mainnet.drpc.org',
+    rpcUrl: 'https://rpc.monad.xyz',
     apiUrl: 'https://api.nadapp.net',
     BONDING_CURVE_ROUTER: '0x6F6B8F1a20703309951a5127c45B49b1CD981A22' as `0x${string}`,
     DEX_ROUTER: '0x0B79d71AE99528D1dB24A4148b5f4F865cc2b137' as `0x${string}`,
@@ -50,7 +50,7 @@ const API_KEY = process.env.NADFUN_API_KEY || '';
 const headers: Record<string, string> = API_KEY ? { 'X-API-Key': API_KEY } : {};
 
 // ============================================================
-// CACHE — Avoid rate limiting
+// SMART CACHE — Avoid refetching same data
 // ============================================================
 
 interface CacheEntry<T> {
@@ -58,86 +58,66 @@ interface CacheEntry<T> {
   timestamp: number;
 }
 
-const cache = {
-  market: new Map<string, CacheEntry<MarketInfo | null>>(),
-  swaps: new Map<string, CacheEntry<SwapInfo[]>>(),
-  price: new Map<string, CacheEntry<number | null>>(),
+// Cache TTLs
+const CACHE_TTL = {
+  TOKEN: 5 * 60 * 1000,      // 5 minutes for token details
+  PRICE: 60 * 1000,          // 1 minute for prices
+  HOLDINGS: 2 * 60 * 1000,   // 2 minutes for wallet holdings
+  LIST: 60 * 1000,           // 1 minute for token list
 };
 
-const CACHE_TTL = 60_000; // 60 seconds cache
+// Caches
+const tokenCache = new Map<string, CacheEntry<Token>>();
+const priceCache = new Map<string, CacheEntry<number>>();
+const holdingsCache = new Map<string, CacheEntry<WalletHolding[]>>();
 
-function getCached<T>(map: Map<string, CacheEntry<T>>, key: string): T | undefined {
-  const entry = map.get(key);
-  if (!entry) return undefined;
-  if (Date.now() - entry.timestamp > CACHE_TTL) {
-    map.delete(key);
-    return undefined;
+function getCached<T>(cache: Map<string, CacheEntry<T>>, key: string, ttl: number): T | null {
+  const entry = cache.get(key.toLowerCase());
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > ttl) {
+    cache.delete(key.toLowerCase());
+    return null;
   }
   return entry.data;
 }
 
-function setCache<T>(map: Map<string, CacheEntry<T>>, key: string, data: T): void {
-  map.set(key, { data, timestamp: Date.now() });
+function setCache<T>(cache: Map<string, CacheEntry<T>>, key: string, data: T): void {
+  cache.set(key.toLowerCase(), { data, timestamp: Date.now() });
 }
 
 // ============================================================
-// RATE LIMITING
+// RATE LIMITING — Simple delay between calls
 // ============================================================
 
 let lastApiCall = 0;
-const MIN_API_INTERVAL = 1000; // 1 second between calls
-const apiQueue: Array<() => Promise<any>> = [];
-let isProcessingQueue = false;
-
-async function processQueue(): Promise<void> {
-  if (isProcessingQueue) return;
-  isProcessingQueue = true;
-  
-  while (apiQueue.length > 0) {
-    const now = Date.now();
-    const timeSinceLastCall = now - lastApiCall;
-    
-    if (timeSinceLastCall < MIN_API_INTERVAL) {
-      await new Promise(r => setTimeout(r, MIN_API_INTERVAL - timeSinceLastCall));
-    }
-    
-    const fn = apiQueue.shift();
-    if (fn) {
-      lastApiCall = Date.now();
-      await fn();
-    }
-  }
-  
-  isProcessingQueue = false;
-}
+const MIN_API_INTERVAL = 500; // 500ms between calls
 
 async function rateLimitedFetch<T>(url: string): Promise<T | null> {
-  return new Promise((resolve) => {
-    apiQueue.push(async () => {
-      try {
-        const res = await fetch(url, { headers });
-        
-        if (res.status === 429) {
-          console.error(`Rate limited: ${url}`);
-          resolve(null);
-          return;
-        }
-        
-        if (!res.ok) {
-          console.error(`API error ${url}: ${res.status}`);
-          resolve(null);
-          return;
-        }
-        
-        const data = await res.json();
-        resolve(data as T);
-      } catch (e) {
-        console.error(`Fetch error ${url}:`, e);
-        resolve(null);
-      }
-    });
-    processQueue();
-  });
+  const now = Date.now();
+  const timeSinceLastCall = now - lastApiCall;
+  if (timeSinceLastCall < MIN_API_INTERVAL) {
+    await new Promise(r => setTimeout(r, MIN_API_INTERVAL - timeSinceLastCall));
+  }
+  lastApiCall = Date.now();
+
+  try {
+    const res = await fetch(url, { headers });
+    
+    if (res.status === 429) {
+      console.error(`⚠️ Rate limited: ${url.slice(-50)}`);
+      return null;
+    }
+    
+    if (!res.ok) {
+      console.error(`API error ${res.status}: ${url.slice(-50)}`);
+      return null;
+    }
+    
+    return await res.json() as T;
+  } catch (e) {
+    console.error(`Fetch error: ${url.slice(-50)}`, e);
+    return null;
+  }
 }
 
 // ============================================================
@@ -244,229 +224,440 @@ export const lensAbi = [
 ] as const;
 
 // ============================================================
-// MARKET DATA — WITH CACHE
+// TOKEN QUEUE — Lazy loading system
 // ============================================================
 
-export interface MarketInfo {
-  price: number;
-  priceUsd: number;
+interface TokenStub {
+  address: string;
+  symbol: string;
+  name: string;
   mcap: number;
   liquidity: number;
   holders: number;
-  volume24h: number;
-  isGraduated: boolean;
-  athPrice: number;
+  priceChange24h: number;
+  createdAt: Date;
+  deployer: string;
+  price: number;
 }
 
-export async function getMarketData(tokenAddress: string): Promise<MarketInfo | null> {
-  // Check cache first
-  const cached = getCached(cache.market, tokenAddress);
-  if (cached !== undefined) {
+const tokenStubQueue: TokenStub[] = [];
+const seenAddresses = new Set<string>();
+
+/**
+ * Fetch the LIST of tokens (1 API call)
+ */
+export async function fetchTokenList(limit: number = 30): Promise<number> {
+  console.log(`📋 Fetching token list (${limit} tokens)...`);
+  
+  const data = await rateLimitedFetch<{ tokens: any[] }>(
+    `${CONFIG.apiUrl}/order/market_cap?page=1&limit=${limit}&direction=DESC&is_nsfw=false`
+  );
+  
+  if (!data?.tokens) {
+    console.error('Failed to fetch token list');
+    return 0;
+  }
+  
+  let added = 0;
+  
+  for (const item of data.tokens) {
+    const t = item.token_info;
+    const m = item.market_info;
+    
+    const address = t?.token_id;
+    if (!address) continue;
+    
+    // Skip if already seen
+    if (seenAddresses.has(address.toLowerCase())) continue;
+    seenAddresses.add(address.toLowerCase());
+    
+    // Calculate basic metrics from list data
+    const priceUsd = parseFloat(m?.price_usd || '0');
+    const totalSupply = parseFloat(m?.total_supply || '0') / 1e18;
+    const mcap = priceUsd * totalSupply;
+    
+    const reserveNative = parseFloat(m?.reserve_native || '0') / 1e18;
+    const nativePrice = parseFloat(m?.native_price || '0');
+    const liquidity = reserveNative * nativePrice * 2;
+    
+    // Basic filters - skip obviously bad tokens
+    if (mcap < 3000 || mcap > 10_000_000) continue;
+    if (liquidity < 300) continue;
+    
+    const stub: TokenStub = {
+      address,
+      symbol: t.symbol || 'UNKNOWN',
+      name: t.name || 'Unknown',
+      mcap,
+      liquidity,
+      holders: m?.holder_count || 0,
+      priceChange24h: item.percent || 0,
+      deployer: t.creator?.account_id || '',
+      createdAt: new Date((t.created_at || 0) * 1000),
+      price: priceUsd,
+    };
+    
+    tokenStubQueue.push(stub);
+    
+    // Also cache this data so we don't refetch later
+    const token: Token = {
+      address: stub.address,
+      symbol: stub.symbol,
+      name: stub.name,
+      price: stub.price,
+      priceChange24h: stub.priceChange24h,
+      mcap: stub.mcap,
+      liquidity: stub.liquidity,
+      holders: stub.holders,
+      deployer: stub.deployer,
+      createdAt: stub.createdAt,
+    };
+    setCache(tokenCache, address, token);
+    setCache(priceCache, address, stub.price);
+    
+    added++;
+  }
+  
+  console.log(`✅ Added ${added} tokens to queue (total: ${tokenStubQueue.length})`);
+  return added;
+}
+
+/**
+ * Get the next token from queue
+ * Uses cache if available, otherwise fetches fresh data
+ */
+export async function getNextToken(): Promise<Token | null> {
+  // If queue is empty, refill it
+  if (tokenStubQueue.length === 0) {
+    console.log('📋 Queue empty, fetching new token list...');
+    const added = await fetchTokenList(30);
+    if (added === 0) {
+      console.log('No new tokens found');
+      return null;
+    }
+  }
+  
+  // Get next stub from queue
+  const stub = tokenStubQueue.shift();
+  if (!stub) return null;
+  
+  // Check cache first - if we have fresh data, use it
+  const cached = getCached(tokenCache, stub.address, CACHE_TTL.TOKEN);
+  if (cached) {
+    console.log(`📦 Using cached data for $${stub.symbol}`);
     return cached;
   }
-
-  const data = await rateLimitedFetch<{ market_info: any }>(`${CONFIG.apiUrl}/agent/market/${tokenAddress}`);
   
-  if (!data?.market_info) {
-    setCache(cache.market, tokenAddress, null);
-    return null;
+  console.log(`🔍 Fetching details for $${stub.symbol} (${tokenStubQueue.length} remaining)...`);
+  
+  // Fetch fresh details
+  const freshToken = await fetchTokenDetails(stub.address);
+  
+  if (freshToken) {
+    // Cache the fresh data
+    setCache(tokenCache, stub.address, freshToken);
+    setCache(priceCache, stub.address, freshToken.price);
+    return freshToken;
   }
-
-  const m = data.market_info;
-  const result: MarketInfo = {
-    price: parseFloat(m.price || '0'),
-    priceUsd: parseFloat(m.price_usd || '0'),
-    mcap: parseFloat(m.market_cap || '0'),
-    liquidity: parseFloat(m.liquidity || '0'),
-    holders: m.holder_count || 0,
-    volume24h: parseFloat(m.volume_24h || '0'),
-    isGraduated: m.market_type === 'DEX',
-    athPrice: parseFloat(m.ath_price || '0'),
+  
+  // Fallback to stub data if fetch failed
+  console.log(`⚠️ Using stub data for $${stub.symbol}`);
+  const token: Token = {
+    address: stub.address,
+    symbol: stub.symbol,
+    name: stub.name,
+    price: stub.price,
+    priceChange24h: stub.priceChange24h,
+    mcap: stub.mcap,
+    liquidity: stub.liquidity,
+    holders: stub.holders,
+    deployer: stub.deployer,
+    createdAt: stub.createdAt,
   };
   
-  setCache(cache.market, tokenAddress, result);
-  return result;
+  setCache(tokenCache, stub.address, token);
+  return token;
+}
+
+/**
+ * Fetch FULL details for a single token
+ */
+async function fetchTokenDetails(address: string): Promise<Token | null> {
+  const data = await rateLimitedFetch<{ token_info: any; market_info: any }>(
+    `https://api.nad.fun/token/${address}`
+  );
+  
+  if (!data) return null;
+  
+  const t = data.token_info || {};
+  const m = data.market_info || {};
+  
+  const priceUsd = parseFloat(m.price_usd || m.token_price || '0');
+  const totalSupply = parseFloat(m.total_supply || '0') / 1e18;
+  const mcap = priceUsd * totalSupply;
+  
+  const reserveNative = parseFloat(m.reserve_native || '0') / 1e18;
+  const nativePrice = parseFloat(m.native_price || '0');
+  const liquidity = reserveNative * nativePrice * 2;
+  
+  return {
+    address,
+    symbol: t.symbol || 'UNKNOWN',
+    name: t.name || 'Unknown',
+    price: priceUsd,
+    priceChange24h: 0,
+    mcap,
+    liquidity,
+    holders: parseInt(m.holder_count) || 0,
+    deployer: t.creator?.account_id || '',
+    createdAt: t.created_at ? new Date(t.created_at * 1000) : new Date(),
+  };
+}
+
+/**
+ * Get queue status
+ */
+export function getQueueStatus(): { remaining: number; seen: number; cached: number } {
+  return {
+    remaining: tokenStubQueue.length,
+    seen: seenAddresses.size,
+    cached: tokenCache.size,
+  };
+}
+
+/**
+ * Clear queue and caches
+ */
+export function clearQueue(): void {
+  tokenStubQueue.length = 0;
+  seenAddresses.clear();
+  tokenCache.clear();
+  priceCache.clear();
+  holdingsCache.clear();
+  console.log('🗑️ Token queue and caches cleared');
 }
 
 // ============================================================
-// TOKEN PRICE — WITH CACHE
+// GET TOKEN PRICE — With smart cache
 // ============================================================
 
 export async function getTokenPrice(tokenAddress: string): Promise<number | null> {
-  const cached = getCached(cache.price, tokenAddress);
-  if (cached !== undefined) return cached;
-
-  const marketData = await getMarketData(tokenAddress);
-  const price = marketData?.price || null;
-  setCache(cache.price, tokenAddress, price);
-  return price;
+  // Check price cache first
+  const cachedPrice = getCached(priceCache, tokenAddress, CACHE_TTL.PRICE);
+  if (cachedPrice !== null) {
+    return cachedPrice;
+  }
+  
+  // Check token cache (might have price)
+  const cachedToken = getCached(tokenCache, tokenAddress, CACHE_TTL.TOKEN);
+  if (cachedToken?.price) {
+    setCache(priceCache, tokenAddress, cachedToken.price);
+    return cachedToken.price;
+  }
+  
+  // Fetch from API
+  try {
+    const data = await rateLimitedFetch<{ market_info: any }>(
+      `${CONFIG.apiUrl}/agent/market/${tokenAddress}`
+    );
+    
+    if (!data?.market_info) return null;
+    
+    const price = parseFloat(data.market_info.price_usd || '0');
+    setCache(priceCache, tokenAddress, price);
+    return price;
+  } catch (error) {
+    return null;
+  }
 }
 
 // ============================================================
-// SWAP HISTORY — WITH CACHE
+// GET TOKEN BY ADDRESS — With cache
 // ============================================================
 
-export interface SwapInfo {
-  eventType: 'BUY' | 'SELL';
-  nativeAmount: string;
-  tokenAmount: string;
-  txHash: string;
-  sender: string;
-  timestamp: number;
+export async function getTokenByAddress(address: string): Promise<Token | null> {
+  // Check cache first
+  const cached = getCached(tokenCache, address, CACHE_TTL.TOKEN);
+  if (cached) {
+    console.log(`📦 Cache hit for ${address.slice(0, 8)}...`);
+    return cached;
+  }
+  
+  // Fetch fresh
+  const token = await fetchTokenDetails(address);
+  if (token) {
+    setCache(tokenCache, address, token);
+    setCache(priceCache, address, token.price);
+  }
+  return token;
 }
 
-export async function getSwapHistory(
-  tokenAddress: string,
-  limit: number = 20,
-  tradeType: 'BUY' | 'SELL' | 'ALL' = 'ALL'
-): Promise<SwapInfo[]> {
-  const cacheKey = `${tokenAddress}-${limit}-${tradeType}`;
-  const cached = getCached(cache.swaps, cacheKey);
-  if (cached !== undefined) return cached;
+// ============================================================
+// WALLET HOLDINGS — With cache
+// ============================================================
 
-  const data = await rateLimitedFetch<{ swaps: any[] }>(
-    `${CONFIG.apiUrl}/agent/swap-history/${tokenAddress}?limit=${limit}&trade_type=${tradeType}`
-  );
+export interface WalletHolding {
+  tokenAddress: string;
+  tokenSymbol: string;
+  tokenName: string;
+  amount: number;
+  valueUsd: number;
+  valueMon: number;
+  priceUsd: number;
+}
 
-  if (!data?.swaps) {
-    setCache(cache.swaps, cacheKey, []);
+export async function getWalletHoldings(walletAddress: string): Promise<WalletHolding[]> {
+  // Check cache first
+  const cached = getCached(holdingsCache, walletAddress, CACHE_TTL.HOLDINGS);
+  if (cached) {
+    console.log(`📦 Cache hit for holdings ${walletAddress.slice(0, 8)}...`);
+    return cached;
+  }
+  
+  try {
+    const data = await rateLimitedFetch<{ tokens: any[]; total_count: number }>(
+      `${CONFIG.apiUrl}/profile/hold-token/${walletAddress}?tableType=hold-tokens-table&page=1&limit=50`
+    );
+    
+    if (!data?.tokens) {
+      setCache(holdingsCache, walletAddress, []);
+      return [];
+    }
+    
+    const holdings: WalletHolding[] = [];
+    
+    for (const item of data.tokens) {
+      const tokenInfo = item.token_info || {};
+      const marketInfo = item.market_info || {};
+      const balanceInfo = item.balance_info || {};
+      
+      // Get balance from balance_info
+      const amount = parseFloat(balanceInfo.balance || '0') / 1e18;
+      if (amount <= 0) continue;
+      
+      // Get prices - prefer market_info for current price
+      const priceUsd = parseFloat(marketInfo.price_usd || marketInfo.token_price || balanceInfo.token_price || '0');
+      const priceMon = parseFloat(marketInfo.price_native || marketInfo.price || '0');
+      const nativePrice = parseFloat(balanceInfo.native_price || marketInfo.native_price || '0.5'); // MON price in USD
+      
+      const valueUsd = amount * priceUsd;
+      const valueMon = priceMon > 0 ? amount * priceMon : (nativePrice > 0 ? valueUsd / nativePrice : 0);
+      
+      holdings.push({
+        tokenAddress: tokenInfo.token_id || '',
+        tokenSymbol: tokenInfo.symbol || 'UNKNOWN',
+        tokenName: tokenInfo.name || 'Unknown',
+        amount,
+        valueUsd,
+        valueMon,
+        priceUsd,
+        priceMon,
+      });
+      
+      // Also cache the price for this token
+      if (tokenInfo.token_id && priceUsd > 0) {
+        setCache(priceCache, tokenInfo.token_id, priceUsd);
+      }
+    }
+    
+    console.log(`📊 Found ${holdings.length} holdings for ${walletAddress.slice(0, 8)}...`);
+    setCache(holdingsCache, walletAddress, holdings);
+    return holdings;
+  } catch (error) {
+    console.error(`Error fetching holdings for ${walletAddress}:`, error);
     return [];
   }
-
-  const result = data.swaps.map((s: any) => ({
-    eventType: s.swap_info?.event_type || 'BUY',
-    nativeAmount: s.swap_info?.native_amount || '0',
-    tokenAmount: s.swap_info?.token_amount || '0',
-    txHash: s.swap_info?.transaction_hash || '',
-    sender: s.swap_info?.sender || '',
-    timestamp: s.swap_info?.timestamp || 0,
-  }));
-  
-  setCache(cache.swaps, cacheKey, result);
-  return result;
 }
 
 // ============================================================
-// CALCULATE RISK SCORE
+// LEGACY FUNCTION — For backwards compatibility
+// ============================================================
+
+export async function getNewTokens(limit: number = 10): Promise<Token[]> {
+  // Just fetch the list, don't fetch details
+  if (tokenStubQueue.length === 0) {
+    await fetchTokenList(limit);
+  }
+  
+  // Return cached tokens (no extra API calls)
+  const tokens: Token[] = [];
+  const stubs = tokenStubQueue.slice(0, limit);
+  
+  for (const stub of stubs) {
+    // Use cache if available
+    const cached = getCached(tokenCache, stub.address, CACHE_TTL.TOKEN);
+    if (cached) {
+      tokens.push(cached);
+    } else {
+      tokens.push({
+        address: stub.address,
+        symbol: stub.symbol,
+        name: stub.name,
+        price: stub.price,
+        priceChange24h: stub.priceChange24h,
+        mcap: stub.mcap,
+        liquidity: stub.liquidity,
+        holders: stub.holders,
+        deployer: stub.deployer,
+        createdAt: stub.createdAt,
+      });
+    }
+  }
+  
+  return tokens;
+}
+
+// ============================================================
+// RISK SCORE — Simplified (no extra API calls)
 // ============================================================
 
 export async function calculateRiskScore(token: Token): Promise<{ score: number; flags: string[] }> {
   const flags: string[] = [];
   let score = 50;
 
-  try {
-    const marketData = await getMarketData(token.address);
-    const swapHistory = await getSwapHistory(token.address, 50);
+  // Liquidity ratio check
+  const liqRatio = token.liquidity / (token.mcap || 1);
+  if (liqRatio < 0.05) {
+    flags.push('Very low liquidity');
+    score += 20;
+  } else if (liqRatio < 0.15) {
+    flags.push('Low liquidity');
+    score += 10;
+  } else if (liqRatio > 0.3) {
+    score -= 10;
+  }
 
-    if (marketData) {
-      const liqRatio = marketData.liquidity / (marketData.mcap || 1);
-      if (liqRatio < 0.05) {
-        flags.push('Very low liquidity');
-        score += 20;
-      } else if (liqRatio < 0.15) {
-        flags.push('Low liquidity');
-        score += 10;
-      } else if (liqRatio > 0.3) {
-        score -= 10;
-      }
-    }
+  // Holder check
+  if (token.holders < 10) {
+    flags.push(`Only ${token.holders} holders`);
+    score += 25;
+  } else if (token.holders < 50) {
+    flags.push(`${token.holders} holders`);
+    score += 15;
+  } else if (token.holders > 500) {
+    score -= 10;
+  }
 
-    if (token.holders < 10) {
-      flags.push(`Only ${token.holders} holders`);
-      score += 25;
-    } else if (token.holders < 50) {
-      flags.push(`${token.holders} holders`);
-      score += 15;
-    } else if (token.holders > 500) {
-      score -= 10;
-    }
+  // Age check
+  const ageHours = (Date.now() - token.createdAt.getTime()) / (1000 * 60 * 60);
+  if (ageHours < 1) {
+    flags.push('Very new (<1h)');
+    score += 15;
+  } else if (ageHours < 6) {
+    flags.push('New (<6h)');
+    score += 10;
+  }
 
-    if (swapHistory.length > 0) {
-      const buyCount = swapHistory.filter(s => s.eventType === 'BUY').length;
-      const sellCount = swapHistory.filter(s => s.eventType === 'SELL').length;
-      
-      if (sellCount > buyCount * 2) {
-        flags.push('High sell pressure');
-        score += 15;
-      }
-    }
-
-    const ageHours = (Date.now() - token.createdAt.getTime()) / (1000 * 60 * 60);
-    if (ageHours < 1) {
-      flags.push('Very new (<1h)');
-      score += 15;
-    } else if (ageHours < 6) {
-      flags.push('New (<6h)');
-      score += 10;
-    }
-
-    if (token.priceChange24h < -50) {
-      flags.push('Major dump');
-      score += 20;
-    } else if (token.priceChange24h < -30) {
-      flags.push('Significant drop');
-      score += 10;
-    }
-
-  } catch (error) {
-    console.error('Risk calc error:', error);
-    flags.push('Data incomplete');
+  // Price change check
+  if (token.priceChange24h < -50) {
+    flags.push('Major dump');
+    score += 20;
+  } else if (token.priceChange24h < -30) {
+    flags.push('Significant drop');
     score += 10;
   }
 
   return { score: Math.max(0, Math.min(100, score)), flags };
-}
-
-// ============================================================
-// NEW TOKENS
-// ============================================================
-
-export async function getNewTokens(limit: number = 10): Promise<Token[]> {
-  try {
-    const data = await rateLimitedFetch<{ tokens: any[] }>(
-      `${CONFIG.apiUrl}/order/market_cap?page=1&limit=${limit}&direction=DESC&is_nsfw=false`
-    );
-    
-    if (!data?.tokens) return [];
-    
-    const tokens: Token[] = [];
-    
-    for (const item of data.tokens) {
-      const t = item.token_info;
-      const m = item.market_info;
-      
-      const address = t?.token_id;
-      if (!address) continue;
-      
-      const priceUsd = parseFloat(m?.price_usd || '0');
-      const totalSupply = parseFloat(m?.total_supply || '0') / 1e18;
-      const mcap = priceUsd * totalSupply;
-      
-      const reserveNative = parseFloat(m?.reserve_native || '0') / 1e18;
-      const nativePrice = parseFloat(m?.native_price || '0');
-      const liquidity = reserveNative * nativePrice * 2;
-      
-      tokens.push({
-        address,
-        symbol: t.symbol || 'UNKNOWN',
-        name: t.name || 'Unknown',
-        price: priceUsd,
-        priceChange24h: item.percent || 0,
-        mcap,
-        liquidity,
-        holders: m?.holder_count || 0,
-        deployer: t.creator?.account_id || '',
-        createdAt: new Date((t.created_at || 0) * 1000),
-      });
-      
-      if (tokens.length >= limit) break;
-    }
-    
-    return tokens;
-  } catch (error) {
-    console.error('Error fetching tokens:', error);
-    return [];
-  }
 }
 
 // ============================================================
@@ -601,6 +792,7 @@ export function createBotWalletClient(privateKey: `0x${string}`): WalletClient {
 }
 
 export async function getWalletBalance(address: `0x${string}`): Promise<bigint> {
+  console.log("address", address);
   return publicClient.getBalance({ address });
 }
 
@@ -613,8 +805,15 @@ export async function getTokenBalance(tokenAddress: `0x${string}`, walletAddress
   });
 }
 
-export function clearCache(): void {
-  cache.market.clear();
-  cache.swaps.clear();
-  cache.price.clear();
+// ============================================================
+// CACHE STATS — For debugging
+// ============================================================
+
+export function getCacheStats(): { tokens: number; prices: number; holdings: number; queue: number } {
+  return {
+    tokens: tokenCache.size,
+    prices: priceCache.size,
+    holdings: holdingsCache.size,
+    queue: tokenStubQueue.length,
+  };
 }

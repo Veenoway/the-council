@@ -23,7 +23,7 @@ interface BotWallet {
   privateKey: `0x${string}`;
 }
 
-function getBotWallet(botId: BotId): BotWallet | null {
+export function getBotWallet(botId: BotId): `0x${string}` | null {
   const prefix = botId.toUpperCase();
   
   // Try bot-specific key first
@@ -41,8 +41,31 @@ function getBotWallet(botId: BotId): BotWallet | null {
   
   try {
     const account = privateKeyToAccount(privateKey);
-    console.log(`✅ ${botId} wallet: ${account.address}`);
-    return { address: account.address, privateKey };
+    return  account.address
+  } catch (error) {
+    console.error(`❌ Invalid private key for ${botId}`);
+    return null;
+  }
+}
+
+export function getBotPK(botId: BotId): `0x${string}` | null {
+  const prefix = botId.toUpperCase();
+  
+  // Try bot-specific key first
+  let privateKey = process.env[`${prefix}_WALLET_PRIVATE_KEY`] as `0x${string}` | undefined;
+  
+  // Fallback to shared wallet for testing
+  if (!privateKey) {
+    privateKey = process.env.SHARED_WALLET_PRIVATE_KEY as `0x${string}` | undefined;
+  }
+  
+  if (!privateKey) {
+    console.log(`❌ No wallet for ${botId}`);
+    return null;
+  }
+  
+  try {
+    return  privateKey
   } catch (error) {
     console.error(`❌ Invalid private key for ${botId}`);
     return null;
@@ -124,7 +147,7 @@ export async function getBotBalance(botId: BotId): Promise<number> {
     const wallet = getBotWallet(botId);
     if (!wallet) return 0;
 
-    const balance = await getWalletBalance(wallet.address);
+    const balance = await getWalletBalance(wallet);
     return parseFloat(formatEther(balance));
   } catch (error) {
     console.error(`Error getting balance for ${botId}:`, error);
@@ -181,7 +204,8 @@ export async function executeBotTrade(
 
   try {
     // Create wallet client
-    const walletClient = createBotWalletClient(wallet.privateKey);
+    const pk = getBotPK(botId);
+    const walletClient = createBotWalletClient(pk as `0x${string}`);
 
     if (side === 'buy') {
       // Execute buy
@@ -204,7 +228,7 @@ export async function executeBotTrade(
       // For sell, need to get token balance first
       const tokenBalance = await getTokenBalance(
         token.address as `0x${string}`,
-        wallet.address
+        wallet
       );
 
       const result = await sellToken(
@@ -259,7 +283,7 @@ export async function closeBotPosition(
   // Get token balance if not specified
   const tokenBalance = amountTokens || await getTokenBalance(
     token.address as `0x${string}`,
-    wallet.address
+    wallet
   );
 
   if (tokenBalance === 0n) {
@@ -286,7 +310,8 @@ export async function closeBotPosition(
   broadcastTrade(trade);
 
   try {
-    const walletClient = createBotWalletClient(wallet.privateKey);
+      const pk = getBotPK(botId);
+    const walletClient = createBotWalletClient(pk as `0x${string}`);
     
     const result = await sellToken(
       walletClient,

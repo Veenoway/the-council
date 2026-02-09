@@ -6,9 +6,9 @@ import { initDatabase, closeDatabase, prisma } from './db/index.js';
 import { initWebSocket, closeWebSocket } from './services/websocket.js';
 import { startOrchestrator } from './services/orchestrator.js';
 import { getCurrentToken, getRecentMessages } from './services/messageBus.js';
-import { getTokenPrice } from './services/nadfun.js';
+import { getWalletHoldings } from './services/nadfun.js';
 import { getBotConfig, ALL_BOT_IDS, type BotId } from './bots/personalities.js';
-import { getBotBalance } from './services/trading.js';
+import { getBotBalance, getBotWallet,  } from './services/trading.js';
 import { startPredictionsResolver } from './jobs/prediction-resolver.js';
 
 // ============================================================
@@ -43,7 +43,7 @@ app.get('/api/current-token', (c) => {
 });
 
 // ============================================================
-// TRADES — Recent trades with live updates
+// TRADES — Recent trades (no live price fetching to avoid rate limits)
 // ============================================================
 
 app.get('/api/trades', async (c) => {
@@ -55,23 +55,10 @@ app.get('/api/trades', async (c) => {
       take: limit,
     });
 
-    const openPositions = positions.filter(p => p.isOpen);
-    const tokenAddresses = [...new Set(openPositions.map(p => p.tokenAddress))];
-    const priceMap: Record<string, number> = {};
-    
-    for (const address of tokenAddresses) {
-      try {
-        const price = await getTokenPrice(address);
-        if (price) priceMap[address] = price;
-      } catch (e) {}
-    }
-
+    // Don't fetch live prices here - use entry price for closed, 
+    // frontend can fetch live prices separately if needed
     const trades = positions.map(p => {
       const entryValue = Number(p.entryValueMon) || 0;
-      const currentPrice = priceMap[p.tokenAddress] || Number(p.entryPrice);
-      const currentValue = p.isOpen ? Number(p.amount) * currentPrice : 0;
-      const pnl = p.isOpen ? currentValue - entryValue : (p.pnl ? Number(p.pnl) : 0);
-      const pnlPercent = entryValue > 0 ? (pnl / entryValue) * 100 : 0;
       const config = getBotConfig(p.botId as BotId);
 
       return {
@@ -85,10 +72,7 @@ app.get('/api/trades', async (c) => {
         amount: Number(p.amount),
         entryPrice: Number(p.entryPrice),
         entryValue: Math.round(entryValue * 1000) / 1000,
-        currentPrice: p.isOpen ? currentPrice : null,
-        currentValue: p.isOpen ? Math.round(currentValue * 1000) / 1000 : null,
-        pnl: Math.round(pnl * 1000) / 1000,
-        pnlPercent: Math.round(pnlPercent * 10) / 10,
+        pnl: p.pnl ? Math.round(Number(p.pnl) * 1000) / 1000 : 0,
         isOpen: p.isOpen,
         createdAt: p.createdAt,
         closedAt: p.closedAt,
@@ -224,9 +208,6 @@ app.get('/api/tokens/analysis/:address', async (c) => {
       orderBy: { createdAt: 'desc' },
     });
 
-    let currentPrice = null;
-    try { currentPrice = await getTokenPrice(address); } catch (e) {}
-
     const botsInvested = positions.filter(p => p.isOpen).map(p => {
       const config = getBotConfig(p.botId as BotId);
       return {
@@ -243,7 +224,6 @@ app.get('/api/tokens/analysis/:address', async (c) => {
         symbol: token.symbol,
         name: token.name,
         price: token.price ? Number(token.price) : null,
-        currentPrice,
         mcap: token.mcap ? Number(token.mcap) : null,
         liquidity: token.liquidity ? Number(token.liquidity) : null,
         holders: token.holders,
@@ -267,36 +247,111 @@ app.get('/api/tokens/analysis/:address', async (c) => {
 });
 
 // ============================================================
-// POSITIONS
+// POSITIONS — No live price fetching to avoid rate limits
 // ============================================================
+
 
 app.get('/api/positions', async (c) => {
   try {
     const positions = await prisma.position.findMany({ where: { isOpen: true }, orderBy: { createdAt: 'desc' } });
-    const tokenAddresses = [...new Set(positions.map(p => p.tokenAddress))];
-    const priceMap: Record<string, number> = {};
     
-    for (const address of tokenAddresses) {
-      try { const price = await getTokenPrice(address); if (price) priceMap[address] = price; } catch (e) {}
+    // Get unique bot wallet addresses
+    const botWallets: Record<string, string> = {};
+    for (const botId of ALL_BOT_IDS) {
+      const addr = getBotWallet(botId);
+      if (addr) botWallets[botId] = addr;
     }
+    
+    // Fetch holdings for all bots in parallel (cached for 2 min)
+    const holdingsMap: Record<string, Record<string, { amount: number; currentValueMon: number; currentPrice: number }>> = {};
 
+   
+    
+    await Promise.all(
+      Object.entries(botWallets).map(async ([botId, walletAddress]) => {
+        try {
+          const holdings = await getWalletHoldings(walletAddress);
+          console.log("holdings",holdings);
+          holdingsMap[botId] = {};
+          for (const h of holdings) {
+
+            
+            holdingsMap[botId][h.tokenAddress.toLowerCase()] = {
+              amount: h.amount,
+              currentValueMon: h.valueMon,
+              currentPrice: h.priceUsd,
+            };
+
+            console.log("h",h)
+
+            if(h.tokenAddress === "0x91ce820dD39A2B5639251E8c7837998530Fe7777") {
+            console.log("holdingsssss",h);
+            }
+          }
+        } catch (e) {
+          console.error(`Error fetching holdings for ${botId}:`, e);
+          holdingsMap[botId] = {};
+        }
+      })
+    );
+
+
+    // Enrich positions with current value and PnL
     const enrichedPositions = positions.map(p => {
-      const currentPrice = priceMap[p.tokenAddress] || 0;
-      const amount = Number(p.amount);
       const entryValueMON = Number(p.entryValueMon) || 0;
-      const currentValueMON = amount * currentPrice;
+      const entryPrice = Number(p.entryPrice) || 0;
+      const dbAmount = Number(p.amount) || 0;
+      
+      // Get current holding data from API
+      const botHoldings = holdingsMap[p.botId] || {};
+      const currentHolding = botHoldings[p.tokenAddress.toLowerCase()];
+      
+      // Use API data if available, otherwise use DB data
+      const currentAmount = currentHolding?.amount || dbAmount;
+      const currentValueMON = currentHolding?.currentValueMon || 0;
+      const currentPrice = currentHolding?.currentPrice || 0;
+      
+      // Calculate PnL
       const pnlMON = currentValueMON - entryValueMON;
       const pnlPercent = entryValueMON > 0 ? (pnlMON / entryValueMON) * 100 : 0;
-      return { id: p.id, botId: p.botId, tokenAddress: p.tokenAddress, tokenSymbol: p.tokenSymbol, amount, entryValueMON, currentValueMON, currentPrice, pnlMON: Math.round(pnlMON * 1000) / 1000, pnlPercent: Math.round(pnlPercent * 10) / 10, isOpen: p.isOpen, createdAt: p.createdAt };
+      
+      return { 
+        id: p.id, 
+        botId: p.botId, 
+        tokenAddress: p.tokenAddress, 
+        tokenSymbol: p.tokenSymbol, 
+        amount: currentAmount,
+        entryAmount: dbAmount,
+        entryValueMON, 
+        entryPrice,
+        currentValueMON: Math.round(currentValueMON * 1000) / 1000,
+        currentPrice,
+        pnlMON: Math.round(pnlMON * 1000) / 1000,
+        pnlPercent: Math.round(pnlPercent * 10) / 10,
+        isOpen: p.isOpen, 
+        createdAt: p.createdAt 
+      };
     });
 
+    // Calculate portfolio totals per bot
     const portfolios = ALL_BOT_IDS.map(botId => {
       const config = getBotConfig(botId);
       const botPositions = enrichedPositions.filter(p => p.botId === botId);
       const totalInvested = botPositions.reduce((sum, p) => sum + p.entryValueMON, 0);
-      const totalValue = botPositions.reduce((sum, p) => sum + p.currentValueMON, 0);
-      const totalPnl = totalValue - totalInvested;
-      return { botId, name: config?.name || botId, positions: botPositions, totalInvested: Math.round(totalInvested * 1000) / 1000, totalValue: Math.round(totalValue * 1000) / 1000, totalPnl: Math.round(totalPnl * 1000) / 1000, openPositions: botPositions.length };
+      const totalCurrentValue = botPositions.reduce((sum, p) => sum + p.currentValueMON, 0);
+      const totalPnlMON = totalCurrentValue - totalInvested;
+      const totalPnlPercent = totalInvested > 0 ? (totalPnlMON / totalInvested) * 100 : 0;
+      
+      return { 
+        botId, 
+        name: config?.name || botId, 
+        positions: botPositions, 
+        totalInvested: Math.round(totalInvested * 1000) / 1000,
+        totalCurrentValue: Math.round(totalCurrentValue * 1000) / 1000,
+        totalPnlMON: Math.round(totalPnlMON * 1000) / 1000,
+        totalPnlPercent: Math.round(totalPnlPercent * 10) / 10,
+        openPositions: botPositions.length 
+      };
     });
 
     return c.json({ positions: enrichedPositions, portfolios, timestamp: new Date().toISOString() });
@@ -312,53 +367,55 @@ app.get('/api/positions', async (c) => {
 
 app.get('/api/bots', async (c) => {
   try {
+    // Get closed positions from DB for win/loss stats
     const allPositions = await prisma.position.findMany();
-    const openPositions = allPositions.filter(p => p.isOpen);
-    const tokenAddresses = [...new Set(openPositions.map(p => p.tokenAddress))];
-    const priceMap: Record<string, number> = {};
-    
-    for (const address of tokenAddresses) {
-      try { const price = await getTokenPrice(address); if (price) priceMap[address] = price; } catch (e) {}
-    }
+    const closedPositions = allPositions.filter(p => !p.isOpen);
 
     const bots = await Promise.all(ALL_BOT_IDS.map(async (botId) => {
       const config = getBotConfig(botId);
-      const botPositions = allPositions.filter(p => p.botId === botId);
-      const botOpenPositions = botPositions.filter(p => p.isOpen);
-      const botClosedPositions = botPositions.filter(p => !p.isOpen);
-
-      let totalEntryValue = 0, totalCurrentValue = 0;
-      for (const p of botOpenPositions) {
-        const entryValue = Number(p.entryValueMon) || 0;
-        const currentPrice = priceMap[p.tokenAddress] || Number(p.entryPrice);
-        totalEntryValue += entryValue;
-        totalCurrentValue += Number(p.amount) * currentPrice;
-      }
-
-      const unrealizedPnl = totalCurrentValue - totalEntryValue;
+      const walletAddress = getBotWallet(botId);
+      
+      // Get bot's closed positions for stats
+      const botClosedPositions = closedPositions.filter(p => p.botId === botId);
       const realizedPnl = botClosedPositions.reduce((sum, p) => sum + (p.pnl ? Number(p.pnl) : 0), 0);
       const wins = botClosedPositions.filter(p => p.pnl && Number(p.pnl) > 0).length;
       const losses = botClosedPositions.filter(p => p.pnl && Number(p.pnl) <= 0).length;
 
+      // Get balance
       let balance = 0;
       try { balance = await getBotBalance(botId); } catch (e) {}
+
+      // Get holdings from API (more reliable than calculating from DB)
+      let holdingsValue = 0;
+      let openPositions = 0;
+      
+      if (walletAddress) {
+        try {
+          const holdings = await getWalletHoldings(walletAddress);
+          holdingsValue = holdings.reduce((sum, h) => sum + h.valueMon, 0);
+          openPositions = holdings.length;
+        } catch (e) {
+          console.error(`Error fetching holdings for ${botId}:`, e);
+        }
+      }
 
       return {
         botId,
         name: config?.name || botId,
         avatar: config?.avatar || '🤖',
         color: config?.color || '#888',
-        openPositions: botOpenPositions.length,
+        walletAddress: walletAddress || null,
+        openPositions,
         closedTrades: botClosedPositions.length,
         wins,
         losses,
         winRate: botClosedPositions.length > 0 ? Math.round((wins / botClosedPositions.length) * 100) : 0,
         realizedPnl: Math.round(realizedPnl * 1000) / 1000,
-        unrealizedPnl: Math.round(unrealizedPnl * 1000) / 1000,
-        totalPnl: Math.round((realizedPnl + unrealizedPnl) * 1000) / 1000,
+        unrealizedPnl: 0, // TODO: calculate from holdings vs entry
+        totalPnl: Math.round(realizedPnl * 1000) / 1000,
         balance: Math.round(balance * 1000) / 1000,
-        holdingsValue: Math.round(totalCurrentValue * 1000) / 1000,
-        totalValue: Math.round((balance + totalCurrentValue) * 1000) / 1000,
+        holdingsValue: Math.round(holdingsValue * 1000) / 1000,
+        totalValue: Math.round((balance + holdingsValue) * 1000) / 1000,
       };
     }));
 
@@ -376,52 +433,63 @@ app.get('/api/bots/:botId', async (c) => {
     const config = getBotConfig(botId);
     if (!config) return c.json({ error: 'Bot not found' }, 404);
 
-    const allPositions = await prisma.position.findMany({ where: { botId }, orderBy: { createdAt: 'desc' } });
-    const openPositions = allPositions.filter(p => p.isOpen);
-    const closedPositions = allPositions.filter(p => !p.isOpen);
-
-    const tokenAddresses = [...new Set(openPositions.map(p => p.tokenAddress))];
-    const priceMap: Record<string, number> = {};
-    for (const address of tokenAddresses) {
-      try { const price = await getTokenPrice(address); if (price) priceMap[address] = price; } catch (e) {}
-    }
-
-    const holdings = openPositions.map(p => {
-      const currentPrice = priceMap[p.tokenAddress] || Number(p.entryPrice);
-      const currentValue = Number(p.amount) * currentPrice;
-      const entryValue = Number(p.entryValueMon) || 0;
-      const pnl = currentValue - entryValue;
-      return {
-        tokenSymbol: p.tokenSymbol,
-        tokenAddress: p.tokenAddress,
-        amount: Number(p.amount),
-        entryValue: Math.round(entryValue * 1000) / 1000,
-        currentValue: Math.round(currentValue * 1000) / 1000,
-        pnl: Math.round(pnl * 1000) / 1000,
-        pnlPercent: entryValue > 0 ? Math.round((pnl / entryValue) * 1000) / 10 : 0,
-      };
+    const walletAddress = getBotWalletAddress(botId);
+    
+    // Get closed positions from DB for stats
+    const closedPositions = await prisma.position.findMany({ 
+      where: { botId, isOpen: false }, 
+      orderBy: { createdAt: 'desc' } 
     });
-
-    const totalEntryValue = holdings.reduce((s, h) => s + h.entryValue, 0);
-    const totalCurrentValue = holdings.reduce((s, h) => s + h.currentValue, 0);
+    
     const realizedPnl = closedPositions.reduce((s, p) => s + (p.pnl ? Number(p.pnl) : 0), 0);
     const wins = closedPositions.filter(p => p.pnl && Number(p.pnl) > 0).length;
 
+    // Get balance
     let balance = 0;
     try { balance = await getBotBalance(botId); } catch (e) {}
 
+    // Get holdings from API (more reliable)
+    let holdings: any[] = [];
+    let totalCurrentValue = 0;
+    
+    if (walletAddress) {
+      try {
+        const apiHoldings = await getWalletHoldings(walletAddress);
+        holdings = apiHoldings.map(h => ({
+          tokenSymbol: h.tokenSymbol,
+          tokenAddress: h.tokenAddress,
+          amount: h.amount,
+          currentValue: Math.round(h.valueMon * 1000) / 1000,
+          priceUsd: h.priceUsd,
+        }));
+        totalCurrentValue = apiHoldings.reduce((sum, h) => sum + h.valueMon, 0);
+      } catch (e) {
+        console.error(`Error fetching holdings for ${botId}:`, e);
+      }
+    }
+
     return c.json({
-      bot: { id: botId, name: config.name, avatar: config.avatar, color: config.color, personality: config.personality },
+      bot: { 
+        id: botId, 
+        name: config.name, 
+        avatar: config.avatar, 
+        color: config.color, 
+        personality: config.personality,
+        walletAddress: walletAddress || null,
+      },
       stats: {
-        openPositions: openPositions.length,
+        openPositions: holdings.length,
         closedTrades: closedPositions.length,
         wins,
         losses: closedPositions.length - wins,
         winRate: closedPositions.length > 0 ? Math.round((wins / closedPositions.length) * 100) : 0,
         realizedPnl: Math.round(realizedPnl * 1000) / 1000,
-        unrealizedPnl: Math.round((totalCurrentValue - totalEntryValue) * 1000) / 1000,
       },
-      balance: { mon: Math.round(balance * 1000) / 1000, holdingsValue: Math.round(totalCurrentValue * 1000) / 1000, totalValue: Math.round((balance + totalCurrentValue) * 1000) / 1000 },
+      balance: { 
+        mon: Math.round(balance * 1000) / 1000, 
+        holdingsValue: Math.round(totalCurrentValue * 1000) / 1000, 
+        totalValue: Math.round((balance + totalCurrentValue) * 1000) / 1000 
+      },
       holdings,
       timestamp: new Date().toISOString(),
     });
@@ -532,6 +600,45 @@ app.get('/api/holder/check/:address', async (c) => {
   } catch (error) {
     console.error('Error checking holder status:', error);
     return c.json({ error: 'Failed to check holder status' }, 500);
+  }
+});
+
+// ============================================================
+// USER TRADE NOTIFICATION — Bots react when users buy
+// ============================================================
+
+app.post('/api/trade/notify', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { userAddress, tokenAddress, tokenSymbol, amountMon, amountTokens, txHash } = body;
+
+    if (!userAddress || !tokenAddress || !tokenSymbol) {
+      return c.json({ error: 'Missing required fields' }, 400);
+    }
+
+    // Import the handler
+    const { handleUserTrade } = await import('./services/orchestrator.js');
+
+    // Trigger bot reactions
+    await handleUserTrade({
+      userAddress,
+      tokenAddress,
+      tokenSymbol,
+      amountMon: parseFloat(amountMon) || 0,
+      amountTokens: parseFloat(amountTokens) || 0,
+      txHash: txHash || '',
+    });
+
+    console.log(`💰 User trade notified: ${userAddress} bought $${tokenSymbol}`);
+
+    return c.json({ 
+      success: true, 
+      message: 'Trade notification received',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error processing trade notification:', error);
+    return c.json({ error: 'Failed to process trade notification' }, 500);
   }
 });
 
