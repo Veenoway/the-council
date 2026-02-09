@@ -7,9 +7,8 @@
 import { createPublicClient, createWalletClient, http, parseAbi } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { monad } from 'viem/chains'; // ou ta custom chain
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../db/index.js';
 
-const prisma = new PrismaClient();
 
 // Config
 const RPC_URL = process.env.MONAD_RPC_URL || 'https://rpc.monad.xyz';
