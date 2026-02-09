@@ -1,5 +1,5 @@
 // ============================================================
-// ORCHESTRATOR v11 — Natural conversation, real prices, no duplicates
+// ORCHESTRATOR v13 — Real conversations, Twitter search, debates
 // ============================================================
 
 import type { BotId, Token, Message } from '../types/index.js';
@@ -14,68 +14,80 @@ import { randomUUID } from 'crypto';
 import OpenAI from 'openai';
 import { canBotTrade } from './monitor.js';
 
+// Enhanced Systems
+import { getBotMentalState, calculateMentalModifiers, applyPersonalityToModifiers, recordTradeResult, loadMentalStatesFromDB, getMentalStateSummary } from './bots/mentalState.js';
+import { getFullSocialContext, type NarrativeAnalysis } from './bots/narrativeAnalysis.js';
+import { analyzeExitLiquidity, quickLiquidityCheck, type ExitAnalysis } from './bots/exitLiquidity.js';
+
 const grok = new OpenAI({
   apiKey: process.env.XAI_API_KEY || process.env.GROK_API_KEY,
   baseURL: 'https://api.x.ai/v1',
 });
 
 // ============================================================
-// BOT CONFIGS
+// BOT PERSONALITIES — Full detail for conversations
 // ============================================================
 
 const BOTS: Record<BotId, {
   name: string;
-  style: string;
+  personality: string;
   expertise: string;
-  uniqueAngles: string[];
-  weights: { holders: number; ta: number; lp: number; momentum: number; };
+  speakingStyle: string;
+  catchphrases: string[];
+  weights: { holders: number; ta: number; lp: number; momentum: number; narrative: number; exitLiquidity: number; };
   bullishThreshold: number;
   bearishThreshold: number;
+  emotionalStability: number;
 }> = {
   chad: {
     name: 'James',
-    style: 'casual degen, uses fr/ngl/ser sparingly, emojis 🔥💀, never lists names',
-    expertise: 'momentum and social buzz',
-    uniqueAngles: ['social momentum', 'degen energy', 'fomo potential', 'meme strength'],
-    weights: { holders: 0.35, ta: 0.15, lp: 0.10, momentum: 0.40 },
-    bullishThreshold: 50,
-    bearishThreshold: 30,
+    personality: 'Degen trader who loves memecoins but has been rugged enough to be skeptical. Gets excited easily but can smell a scam.',
+    expertise: 'Social momentum, meme culture, Twitter/CT vibes',
+    speakingStyle: 'Uses "fr", "ngl", "ser", emojis like 🔥💀😤. Short punchy sentences. Gets hyped or dismissive.',
+    catchphrases: ['this ones different fr', 'narrative cooked', 'aping', 'exit liquidity vibes', 'touch grass ser'],
+    weights: { holders: 0.15, ta: 0.10, lp: 0.05, momentum: 0.25, narrative: 0.35, exitLiquidity: 0.10 },
+    bullishThreshold: 55, bearishThreshold: 35,
+    emotionalStability: 0.3,
   },
   quantum: {
-    name: 'Keone', 
-    style: 'analytical, precise with numbers, measured tone, never lists names',
-    expertise: 'technical analysis and chart patterns',
-    uniqueAngles: ['RSI levels', 'MACD signals', 'Bollinger bands', 'chart patterns', 'MA structure'],
-    weights: { holders: 0.20, ta: 0.45, lp: 0.15, momentum: 0.20 },
-    bullishThreshold: 55,
-    bearishThreshold: 40,
+    name: 'Keone',
+    personality: 'Data-driven analyst. Trusts numbers over narratives. Skeptical of hype, wants to see the chart.',
+    expertise: 'Technical analysis, chart patterns, indicators',
+    speakingStyle: 'Precise, uses percentages and metrics. Measured tone. Sometimes dry humor.',
+    catchphrases: ['the data suggests', 'RSI showing', 'pattern forming', 'need more confirmation', 'statistically'],
+    weights: { holders: 0.15, ta: 0.40, lp: 0.15, momentum: 0.15, narrative: 0.05, exitLiquidity: 0.10 },
+    bullishThreshold: 58, bearishThreshold: 42,
+    emotionalStability: 0.9,
   },
   sensei: {
     name: 'Portdev',
-    style: 'chill anime vibes, occasional Japanese, wise, never lists names',
-    expertise: 'community dynamics and holder behavior',
-    uniqueAngles: ['holder conviction', 'diamond hands', 'community loyalty', 'organic growth'],
-    weights: { holders: 0.45, ta: 0.15, lp: 0.10, momentum: 0.30 },
-    bullishThreshold: 50,
-    bearishThreshold: 30,
+    personality: 'Zen community watcher. Believes in the power of diamond hands and real believers. Anime vibes.',
+    expertise: 'Community analysis, holder behavior, organic growth',
+    speakingStyle: 'Chill, occasional Japanese words (sugoi, nani), thoughtful, references anime/manga.',
+    catchphrases: ['the community speaks', 'diamond hands', 'organic growth', 'believers hold', 'nakama energy'],
+    weights: { holders: 0.35, ta: 0.10, lp: 0.10, momentum: 0.20, narrative: 0.20, exitLiquidity: 0.05 },
+    bullishThreshold: 52, bearishThreshold: 32,
+    emotionalStability: 0.8,
   },
   sterling: {
     name: 'Harpal',
-    style: 'formal risk analyst, dry humor, measured, never lists names',
-    expertise: 'risk assessment and liquidity',
-    uniqueAngles: ['LP depth', 'slippage risk', 'exit liquidity', 'position sizing'],
-    weights: { holders: 0.25, ta: 0.25, lp: 0.35, momentum: 0.15 },
-    bullishThreshold: 60,
-    bearishThreshold: 45,
+    personality: 'Risk manager. Worst-case thinker. Has saved the group from rugs before. Dry British humor.',
+    expertise: 'Risk assessment, exit liquidity, position sizing, slippage',
+    speakingStyle: 'Formal but with dry wit. Uses precise numbers. Can veto trades.',
+    catchphrases: ['the exit concerns me', 'position sizing matters', 'I calculate', 'worst case scenario', 'liquidity insufficient'],
+    weights: { holders: 0.10, ta: 0.15, lp: 0.25, momentum: 0.10, narrative: 0.05, exitLiquidity: 0.35 },
+    bullishThreshold: 65, bearishThreshold: 50,
+    emotionalStability: 0.7,
   },
   oracle: {
     name: 'Mike',
-    style: 'cryptic oracle, short mysterious statements, 👁️, never lists names',
-    expertise: 'whale movements and hidden signals',
-    uniqueAngles: ['whale wallets', 'smart money', 'accumulation', 'hidden patterns'],
-    weights: { holders: 0.30, ta: 0.30, lp: 0.15, momentum: 0.25 },
-    bullishThreshold: 55,
-    bearishThreshold: 40,
+    personality: 'Mysterious oracle. Sees patterns others miss. Contrarian when everyone agrees. Speaks in riddles sometimes.',
+    expertise: 'Whale movements, hidden signals, market psychology',
+    speakingStyle: 'Cryptic, short statements, uses 👁️, references "the signs", often poses questions.',
+    catchphrases: ['the signs show', 'whales accumulate in silence', 'when all agree, question', 'I sense', 'the pattern reveals'],
+    weights: { holders: 0.20, ta: 0.25, lp: 0.10, momentum: 0.20, narrative: 0.20, exitLiquidity: 0.05 },
+    bullishThreshold: 55, bearishThreshold: 40,
+    emotionalStability: 0.6,
   },
 };
 
@@ -86,10 +98,10 @@ const BOTS: Record<BotId, {
 let currentToken: Token | null = null;
 let isAnalyzing = false;
 let lastTokenScan = 0;
+let lastIdleChat = 0;
 const TOKEN_SCAN_INTERVAL = 120_000;
+const IDLE_CHAT_INTERVAL = 180_000; // 3 minutes without tokens = idle chat
 const seenTokens = new Set<string>();
-
-// Anti-duplicate: track exact messages sent this session
 const sentMessages = new Set<string>();
 
 // ============================================================
@@ -97,7 +109,8 @@ const sentMessages = new Set<string>();
 // ============================================================
 
 export async function startOrchestrator(): Promise<void> {
-  console.log('🏛️ The Council v11 - Natural conversation');
+  console.log('🏛️ The Council v13 - Real Conversations & Twitter Search');
+  await loadMentalStatesFromDB();
 
   onInternalEvent('human_message', async (data) => {
     await handleHumanMessage(data);
@@ -107,7 +120,13 @@ export async function startOrchestrator(): Promise<void> {
     try {
       if (!isAnalyzing && Date.now() - lastTokenScan > TOKEN_SCAN_INTERVAL) {
         lastTokenScan = Date.now();
-        await scanForNewTokens();
+        const foundToken = await scanForNewTokens();
+        
+        // If no new token found, maybe do idle chat
+        if (!foundToken && Date.now() - lastIdleChat > IDLE_CHAT_INTERVAL) {
+          lastIdleChat = Date.now();
+          await idleConversation();
+        }
       }
       await sleep(5000);
     } catch (error) {
@@ -117,280 +136,250 @@ export async function startOrchestrator(): Promise<void> {
   }
 }
 
-async function scanForNewTokens(): Promise<void> {
+async function scanForNewTokens(): Promise<boolean> {
   try {
     const tokens = await getNewTokens();
-
     for (const token of tokens) {
       if (seenTokens.has(token.address)) continue;
       seenTokens.add(token.address);
-
       if (token.mcap < 3000 || token.mcap > 10_000_000) continue;
       if (token.liquidity < 300) continue;
 
+      const quickCheck = quickLiquidityCheck(token, 1);
+      if (!quickCheck.ok) {
+        console.log(`⏭️ Skipping ${token.symbol}: ${quickCheck.reason}`);
+        continue;
+      }
       await analyzeToken(token);
-      break;
+      return true; // Found and analyzing a token
     }
+    return false; // No new token found
   } catch (error) {
     console.error('Scan error:', error);
+    return false;
   }
 }
 
 // ============================================================
-// PRICE FORMATTING — Use real prices
+// IDLE CONVERSATION — Check Monad/nad.fun Twitter when no tokens
 // ============================================================
 
-function formatPrice(price: number): string {
-  if (price >= 1) return `$${price.toFixed(2)}`;
-  if (price >= 0.01) return `$${price.toFixed(4)}`;
-  if (price >= 0.0001) return `$${price.toFixed(6)}`;
-  return `$${price.toFixed(8)}`;
-}
-
-function formatMcap(mcap: number): string {
-  if (mcap >= 1_000_000) return `${(mcap / 1_000_000).toFixed(1)}M`;
-  return `${(mcap / 1000).toFixed(0)}K`;
-}
-
-// ============================================================
-// TA SUMMARY BUILDER — With real prices
-// ============================================================
-
-interface TASummary {
-  keyIndicators: string[];
-  patterns: string[];
-  signals: string[];
-  verdict: string;
-  score: number;
-  forKeone: string[];
-  forJames: string[];
-  forPortdev: string[];
-  forHarpal: string[];
-  forMike: string[];
-}
-
-function buildTASummary(ta: TechnicalIndicators | null, token: Token, riskFlags: string[]): TASummary {
-  const forKeone: string[] = [];
-  const forJames: string[] = [];
-  const forPortdev: string[] = [];
-  const forHarpal: string[] = [];
-  const forMike: string[] = [];
+async function idleConversation(): Promise<void> {
+  if (isAnalyzing) return;
   
-  const keyIndicators: string[] = [];
-  const patterns: string[] = [];
-  const signals: string[] = [];
-  let score = 50;
-
-  const price = formatPrice(token.price);
-  const mcap = formatMcap(token.mcap);
-
-  if (!ta) {
-    return {
-      keyIndicators: ['Limited data'],
-      patterns: [],
-      signals: [],
-      verdict: 'insufficient data',
-      score: 50,
-      forKeone: ['Not enough candle data yet'],
-      forJames: ['Volume building'],
-      forPortdev: [`${token.holders.toLocaleString()} holders in`],
-      forHarpal: ['Need more data for full risk assessment'],
-      forMike: ['The data keeps its secrets for now'],
-    };
-  }
-
-  // ============ RSI ============
-  if (ta.rsi !== undefined) {
-    const rsi = ta.rsi.toFixed(0);
-    if (ta.rsi <= 30) {
-      forKeone.push(`RSI at ${rsi} - oversold, bounce setup`);
-      score += 15;
-    } else if (ta.rsi <= 40) {
-      forKeone.push(`RSI ${rsi} approaching oversold`);
-      score += 8;
-    } else if (ta.rsi >= 80) {
-      forKeone.push(`RSI ${rsi} way overbought - careful here`);
-      score -= 15;
-    } else if (ta.rsi >= 70) {
-      forKeone.push(`RSI ${rsi} getting hot`);
-      score -= 5;
-    } else if (ta.rsi >= 55) {
-      forKeone.push(`RSI ${rsi} showing healthy momentum`);
-      score += 8;
-    } else {
-      forKeone.push(`RSI ${rsi} neutral zone`);
-    }
-    keyIndicators.push(`RSI ${rsi}`);
-  }
-
-  // ============ MACD ============
-  if (ta.macdCrossover === 'bullish') {
-    forKeone.push('MACD just crossed bullish');
-    signals.push('MACD buy signal');
-    score += 15;
-  } else if (ta.macdCrossover === 'bearish') {
-    forKeone.push('MACD crossed bearish');
-    score -= 12;
-  }
+  console.log('💬 No new tokens, starting idle conversation...');
+  sentMessages.clear();
+  const chat: string[] = [];
   
-  if (ta.macdHistogram !== undefined && ta.macdHistogram > 0) {
-    forKeone.push('MACD histogram expanding positive');
-    score += 5;
-  }
-
-  // ============ BOLLINGER BANDS ============
-  if (ta.bbSqueeze) {
-    forKeone.push('BB squeeze forming - big move coming');
-    forMike.push('The bands tighten... coiling for release');
-    patterns.push('BB squeeze');
-    score += 12;
-  }
-  
-  if (ta.bbPosition === 'below_lower') {
-    forKeone.push('Below lower BB - oversold');
-    score += 8;
-  } else if (ta.bbPosition === 'above_upper') {
-    forKeone.push('Riding upper BB - extended');
-    score -= 5;
-  }
-
-  // ============ MOVING AVERAGES ============
-  if (ta.maCrossover === 'golden_cross') {
-    forKeone.push('Golden cross confirmed');
-    patterns.push('Golden cross');
-    score += 15;
-  } else if (ta.maCrossover === 'death_cross') {
-    forKeone.push('Death cross forming');
-    patterns.push('Death cross');
-    score -= 15;
-  }
-  
-  if (ta.priceVsMa === 'above_all') {
-    forKeone.push('Price above all major MAs');
-    score += 10;
-  } else if (ta.priceVsMa === 'below_all') {
-    forKeone.push('Below all MAs - downtrend');
-    score -= 10;
-  }
-
-  // ============ CHART PATTERNS ============
-  if (ta.patterns && ta.patterns.length > 0) {
-    for (const p of ta.patterns) {
-      const name = p.name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-      if (p.direction === 'bullish') {
-        forKeone.push(`${name} pattern (${p.confidence}% confidence)`);
-        patterns.push(name);
-        score += Math.floor(p.confidence / 8);
-      } else if (p.direction === 'bearish') {
-        forKeone.push(`${name} - bearish pattern`);
-        patterns.push(name);
-        score -= Math.floor(p.confidence / 8);
+  try {
+    // 50% chance: Check Monad/nad.fun Twitter
+    // 50% chance: General crypto chat
+    const doTwitterCheck = Math.random() > 0.5;
+    
+    if (doTwitterCheck) {
+      // ========== CHECK MONAD/NADFUN TWITTER ==========
+      console.log('🐦 Checking @monad_xyz and @naddotfun...');
+      
+      const account = Math.random() > 0.5 ? '@monad_xyz' : '@naddotfun';
+      
+      const twitterCheck = await grok.chat.completions.create({
+        model: 'grok-3-latest',
+        messages: [
+          { 
+            role: 'system', 
+            content: 'You have real-time Twitter/X access. Check this account for recent activity.' 
+          },
+          { 
+            role: 'user', 
+            content: `Check ${account} on Twitter. What have they posted in the last 24-48 hours? Any announcements, updates, or interesting tweets? Summarize in 2-3 sentences.` 
+          }
+        ],
+        max_tokens: 150,
+        temperature: 0.5,
+      });
+      
+      const twitterContent = twitterCheck.choices[0]?.message?.content || '';
+      console.log(`📱 Twitter check result: ${twitterContent.slice(0, 100)}...`);
+      
+      if (twitterContent && !twitterContent.toLowerCase().includes('no recent') && !twitterContent.toLowerCase().includes('unable to')) {
+        // James or Portdev spots the news
+        const spotter = Math.random() > 0.5 ? 'chad' : 'sensei';
+        
+        const spotterMsg = await botSpeak(spotter as BotId,
+          `You just checked ${account} on Twitter and saw: "${twitterContent}"
+Share this with the group. React based on your personality. Keep it natural.`,
+          chat
+        );
+        await sayIdle(spotter as BotId, spotterMsg);
+        chat.push(`${BOTS[spotter as BotId].name}: ${spotterMsg}`);
+        await sleep(4000);
+        
+        // Another bot responds
+        const responder1 = (['quantum', 'sterling', 'oracle'] as BotId[])[Math.floor(Math.random() * 3)];
+        const response1 = await botSpeak(responder1,
+          `${account} news discussion. Give your take.`,
+          chat,
+          { name: BOTS[spotter as BotId].name, message: spotterMsg }
+        );
+        await sayIdle(responder1, response1);
+        chat.push(`${BOTS[responder1].name}: ${response1}`);
+        await sleep(3500);
+        
+        // Third person
+        const others = ALL_BOT_IDS.filter(b => b !== spotter && b !== responder1);
+        const responder2 = others[Math.floor(Math.random() * others.length)];
+        const response2 = await botSpeak(responder2,
+          `Continue the ${account} discussion.`,
+          chat
+        );
+        await sayIdle(responder2, response2);
+        await sleep(3000);
+        
+        return;
       }
     }
+    
+    // ========== FALLBACK: GENERAL MONAD/CRYPTO CHAT ==========
+    const idleTopics = [
+      { topic: 'nad.fun volume', context: 'nad.fun is the memecoin launchpad on Monad. Discuss trading volume or activity.' },
+      { topic: 'Monad ecosystem', context: 'Monad is a high-performance L1 blockchain. Discuss the ecosystem growth.' },
+      { topic: 'memecoin meta', context: 'What memecoin narratives are hot right now? AI? Animals? Culture?' },
+      { topic: 'waiting for plays', context: 'Market is quiet. What setups are you watching?' },
+      { topic: 'best entries', context: 'What makes a good memecoin entry? Discuss your criteria.' },
+      { topic: 'risk management', context: 'How do you size positions? When do you cut losses?' },
+      { topic: 'Monad TGE speculation', context: 'Monad mainnet and TGE coming. What are your expectations?' },
+      { topic: 'CT vibes today', context: 'How is Crypto Twitter sentiment today? Bullish? Bearish?' },
+    ];
+    
+    const selected = idleTopics[Math.floor(Math.random() * idleTopics.length)];
+    console.log(`💭 Idle topic: ${selected.topic}`);
+    
+    // Random starter
+    const starter = ALL_BOT_IDS[Math.floor(Math.random() * ALL_BOT_IDS.length)];
+    
+    const starterMsg = await botSpeak(starter,
+      `Start a casual conversation about: ${selected.topic}
+Context: ${selected.context}
+Keep it natural, like you're chatting while waiting for the next token.`,
+      chat
+    );
+    await sayIdle(starter, starterMsg);
+    chat.push(`${BOTS[starter].name}: ${starterMsg}`);
+    await sleep(4000);
+    
+    // Someone responds
+    const responders = ALL_BOT_IDS.filter(b => b !== starter);
+    const responder1 = responders[Math.floor(Math.random() * responders.length)];
+    
+    const response1 = await botSpeak(responder1,
+      `${selected.topic} discussion. Give your perspective.`,
+      chat,
+      { name: BOTS[starter].name, message: starterMsg }
+    );
+    await sayIdle(responder1, response1);
+    chat.push(`${BOTS[responder1].name}: ${response1}`);
+    await sleep(3500);
+    
+    // Maybe a third person
+    if (Math.random() > 0.4) {
+      const remaining = responders.filter(b => b !== responder1);
+      const responder2 = remaining[Math.floor(Math.random() * remaining.length)];
+      
+      const response2 = await botSpeak(responder2,
+        `Join the conversation about ${selected.topic}.`,
+        chat
+      );
+      await sayIdle(responder2, response2);
+    }
+    
+  } catch (error) {
+    console.error('Idle conversation error:', error);
   }
+}
 
-  // ============ TREND ============
-  if (ta.trend === 'strong_uptrend') {
-    forKeone.push('Strong uptrend - higher highs, higher lows');
-    score += 12;
-  } else if (ta.trend === 'uptrend') {
-    forKeone.push('Uptrend intact');
-    score += 8;
-  } else if (ta.trend === 'sideways') {
-    forKeone.push('Consolidating sideways');
-  } else if (ta.trend === 'downtrend') {
-    forKeone.push('Downtrend active');
-    score -= 10;
-  }
-
-  // ============ SUPPORT/RESISTANCE - Use real price ============
-  if (ta.nearSupport && ta.supportLevel) {
-    forKeone.push(`Testing support at ${formatPrice(ta.supportLevel)}`);
-    score += 5;
-  } else if (ta.nearSupport) {
-    forKeone.push('Near key support level');
-    score += 5;
-  }
-  
-  if (ta.nearResistance && ta.resistanceLevel) {
-    forKeone.push(`Resistance at ${formatPrice(ta.resistanceLevel)}`);
-    score -= 5;
-  }
-
-  // ============ VOLUME ============
-  if (ta.volumeSpike) {
-    forJames.push(`Volume spiking ${ta.volumeRatio?.toFixed(1)}x`);
-    forMike.push('Volume speaks... someone knows');
-    score += 10;
-  } else if (ta.volumeRatio && ta.volumeRatio > 1.5) {
-    forJames.push(`Volume up ${ta.volumeRatio.toFixed(1)}x`);
-    score += 5;
-  }
-
-  // ============ OBV ============
-  if (ta.obvTrend === 'accumulation') {
-    forMike.push('OBV showing accumulation');
-    signals.push('Accumulation');
-    score += 8;
-  } else if (ta.obvTrend === 'distribution') {
-    forMike.push('OBV diverging - distribution');
-    forHarpal.push('OBV shows distribution');
-    score -= 10;
-  }
-
-  // ============ WHALE ACTIVITY ============
-  if (ta.whaleActivity === 'buying') {
-    forMike.push('Whale wallets accumulating');
-    score += 12;
-  } else if (ta.whaleActivity === 'selling') {
-    forMike.push('Whale distribution detected');
-    forHarpal.push('Large holders reducing');
-    score -= 15;
-  }
-
-  // ============ HOLDERS (for Portdev) ============
-  const h = token.holders;
-  if (h >= 20000) {
-    forPortdev.push(`${h.toLocaleString()} holders - that's massive for Monad`);
-  } else if (h >= 10000) {
-    forPortdev.push(`${h.toLocaleString()} believers - serious community`);
-  } else if (h >= 5000) {
-    forPortdev.push(`${h.toLocaleString()} holders showing conviction`);
-  } else if (h >= 1000) {
-    forPortdev.push(`${h.toLocaleString()} holders building`);
-  }
-
-  // ============ RISK (for Harpal) ============
-  const lpRatio = token.liquidity / (token.mcap || 1);
-  if (lpRatio < 0.05) {
-    forHarpal.push(`LP at ${(lpRatio * 100).toFixed(1)}% is thin - watch slippage`);
-  } else if (lpRatio < 0.08) {
-    forHarpal.push(`${(lpRatio * 100).toFixed(1)}% LP - size accordingly`);
-  } else if (lpRatio >= 0.15) {
-    forHarpal.push(`${(lpRatio * 100).toFixed(1)}% LP is healthy`);
-  } else {
-    forHarpal.push(`LP ratio at ${(lpRatio * 100).toFixed(1)}%`);
-  }
-  
-  if (riskFlags.length > 0) {
-    forHarpal.push(`Flags: ${riskFlags.slice(0, 2).join(', ')}`);
-  }
-
-  // Clamp
-  score = Math.max(0, Math.min(100, score));
-
-  let verdict: string;
-  if (score >= 75) verdict = 'strong bullish';
-  else if (score >= 60) verdict = 'bullish';
-  else if (score >= 45) verdict = 'neutral';
-  else if (score >= 30) verdict = 'bearish';
-  else verdict = 'strong bearish';
-
-  return { keyIndicators, patterns, signals, verdict, score, forKeone, forJames, forPortdev, forHarpal, forMike };
+// Idle messages don't have a token context
+async function sayIdle(botId: BotId, content: string): Promise<void> {
+  if (!content || content.length < 2) return;
+  const msg: Message = { id: randomUUID(), botId, content, token: undefined, messageType: 'chat', createdAt: new Date() };
+  await saveMessage(msg);
+  broadcastMessage(msg);
 }
 
 // ============================================================
-// SCORES
+// CONVERSATION GENERATION
+// ============================================================
+
+async function botSpeak(
+  botId: BotId, 
+  context: string, 
+  chatHistory: string[],
+  replyTo?: { name: string; message: string }
+): Promise<string> {
+  const bot = BOTS[botId];
+  const mentalState = getBotMentalState(botId);
+  const mentalSummary = getMentalStateSummary(botId);
+  
+  const systemPrompt = `You are ${bot.name} in a crypto trading group chat.
+
+PERSONALITY: ${bot.personality}
+EXPERTISE: ${bot.expertise}
+SPEAKING STYLE: ${bot.speakingStyle}
+PHRASES YOU USE: ${bot.catchphrases.join(', ')}
+
+CURRENT MENTAL STATE: ${mentalSummary || 'focused'}
+${mentalState.lossStreak >= 2 ? `You've had ${mentalState.lossStreak} losses recently - you're more cautious.` : ''}
+${mentalState.winStreak >= 2 ? `You're on a ${mentalState.winStreak} win streak - confident but not reckless.` : ''}
+
+CRITICAL RULES:
+1. ALWAYS CITE SPECIFIC DATA - say "RSI at 42" not just "oversold", say "2.3x volume spike" not just "volume up"
+2. EXPLAIN YOUR REASONING - "I'm bullish because X, Y, Z" not just "bullish"
+3. USE ACTUAL NUMBERS given to you - prices, percentages, holder counts
+4. Stay in character - use your speaking style and phrases
+5. Keep it 15-30 words - concise but informative
+6. NEVER start with someone's name
+7. Be SKEPTICAL - 95% of memecoins fail
+8. If you disagree, say WHY with data`;
+
+  const userPrompt = replyTo 
+    ? `${replyTo.name} just said: "${replyTo.message}"
+
+${context}
+
+Respond to ${replyTo.name}. Do you agree? Disagree? Have a follow-up question?`
+    : `${context}
+
+Recent chat:
+${chatHistory.slice(-4).join('\n')}
+
+Share your take. What's your read?`;
+
+  try {
+    const res = await grok.chat.completions.create({
+      model: 'grok-3-latest',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      max_tokens: 120,  // Increased for more detailed explanations
+      temperature: 0.9,
+    });
+
+    let text = res.choices[0]?.message?.content || '';
+    // Clean up
+    text = text.replace(/^(yo|hey|oh|so|well|look|okay|guys|team),?\s*/i, '');
+    text = text.replace(/^(james|keone|portdev|harpal|mike)(,\s*)+/i, '');
+    
+    const result = text.trim().slice(0, 200);
+    console.log(`   💬 ${bot.name}: "${result.slice(0, 50)}..."`);
+    return result;
+  } catch (e) {
+    console.error(`❌ Grok error for ${botId}:`, e);
+    return `hmm, let me think about this...`;
+  }
+}
+
+// ============================================================
+// CALCULATE BOT OPINIONS
 // ============================================================
 
 interface TokenScores {
@@ -398,66 +387,82 @@ interface TokenScores {
   taScore: number;
   lpScore: number;
   momentumScore: number;
+  narrativeScore: number;
+  exitLiquidityScore: number;
   overall: number;
-  holderVerdict: string;
-  lpVerdict: string;
-  taSummary: TASummary;
 }
 
-function calculateScores(token: Token, ta: TechnicalIndicators | null, riskScore: number, riskFlags: string[]): TokenScores {
-  const taSummary = buildTASummary(ta, token, riskFlags);
-  
-  let holdersScore = 0, holderVerdict = '';
-  if (token.holders >= 30000) { holdersScore = 98; holderVerdict = 'exceptional'; }
-  else if (token.holders >= 20000) { holdersScore = 95; holderVerdict = 'massive'; }
-  else if (token.holders >= 10000) { holdersScore = 90; holderVerdict = 'huge'; }
-  else if (token.holders >= 5000) { holdersScore = 80; holderVerdict = 'very strong'; }
-  else if (token.holders >= 2000) { holdersScore = 70; holderVerdict = 'solid'; }
-  else if (token.holders >= 1000) { holdersScore = 60; holderVerdict = 'decent'; }
-  else { holdersScore = 45; holderVerdict = 'early'; }
-
-  const taScore = taSummary.score;
-
+function calculateScores(token: Token, ta: TechnicalIndicators | null, narrative: NarrativeAnalysis | null, exitAnalysis: ExitAnalysis | null): TokenScores {
+  let holdersScore = token.holders >= 30000 ? 98 : token.holders >= 10000 ? 90 : token.holders >= 5000 ? 80 : token.holders >= 1000 ? 60 : 45;
+  let taScore = ta?.confidence || 50;
   const lpRatio = token.liquidity / (token.mcap || 1);
-  let lpScore = 0, lpVerdict = '';
-  if (lpRatio >= 0.15) { lpScore = 85; lpVerdict = 'healthy'; }
-  else if (lpRatio >= 0.10) { lpScore = 70; lpVerdict = 'decent'; }
-  else if (lpRatio >= 0.07) { lpScore = 55; lpVerdict = 'acceptable'; }
-  else if (lpRatio >= 0.05) { lpScore = 40; lpVerdict = 'thin'; }
-  else { lpScore = 25; lpVerdict = 'low'; }
-
+  let lpScore = lpRatio >= 0.15 ? 85 : lpRatio >= 0.10 ? 70 : lpRatio >= 0.05 ? 40 : 25;
   let momentumScore = 50;
-  if (ta) {
-    let m = 50;
-    if (ta.volumeSpike) m += 20;
-    else if (ta.volumeRatio && ta.volumeRatio > 1.5) m += 10;
-    if (ta.obvTrend === 'accumulation') m += 10;
-    else if (ta.obvTrend === 'distribution') m -= 10;
-    if (ta.whaleActivity === 'buying') m += 10;
-    else if (ta.whaleActivity === 'selling') m -= 15;
-    momentumScore = Math.max(0, Math.min(100, m));
-  }
+  if (ta?.volumeSpike) momentumScore += 20;
+  if (ta?.obvTrend === 'accumulation') momentumScore += 10;
+  if (ta?.whaleActivity === 'selling') momentumScore -= 15;
+  let narrativeScore = narrative ? Math.round(narrative.narrativeScore * 0.5 + narrative.socialScore * 0.5) : 50;
+  if (narrative?.isLikelyScam) narrativeScore = 10;
+  let exitLiquidityScore = exitAnalysis?.liquidityScore || 50;
+  if (exitAnalysis && !exitAnalysis.canExit) exitLiquidityScore = 0;
 
-  const overall = (holdersScore + taScore + lpScore + momentumScore) / 4;
-
-  return { holdersScore, taScore, lpScore, momentumScore, overall, holderVerdict, lpVerdict, taSummary };
+  const overall = holdersScore * 0.20 + taScore * 0.25 + lpScore * 0.15 + momentumScore * 0.15 + narrativeScore * 0.15 + exitLiquidityScore * 0.10;
+  return { holdersScore, taScore, lpScore, momentumScore, narrativeScore, exitLiquidityScore, overall };
 }
 
-function calculateBotOpinion(botId: BotId, scores: TokenScores): 'bullish' | 'bearish' | 'neutral' {
+function calculateBotOpinion(botId: BotId, scores: TokenScores, narrative: NarrativeAnalysis | null, exitAnalysis: ExitAnalysis | null) {
   const bot = BOTS[botId];
-  const w = 
-    (scores.holdersScore * bot.weights.holders) +
-    (scores.taScore * bot.weights.ta) +
-    (scores.lpScore * bot.weights.lp) +
-    (scores.momentumScore * bot.weights.momentum);
+  const modifiers = applyPersonalityToModifiers(botId, calculateMentalModifiers(botId));
   
-  if (w >= bot.bullishThreshold) return 'bullish';
-  if (w < bot.bearishThreshold) return 'bearish';
-  return 'neutral';
+  if (modifiers.shouldSkip) {
+    return { opinion: 'neutral' as const, confidence: 0, positionMultiplier: 0, mentalNote: modifiers.skipReason || 'sitting out' };
+  }
+  
+  let weightedScore = 
+    scores.holdersScore * bot.weights.holders +
+    scores.taScore * bot.weights.ta +
+    scores.lpScore * bot.weights.lp +
+    scores.momentumScore * bot.weights.momentum +
+    scores.narrativeScore * bot.weights.narrative +
+    scores.exitLiquidityScore * bot.weights.exitLiquidity;
+  
+  // Intuition randomness
+  weightedScore += (Math.random() * 8 - 4) * (1 - bot.emotionalStability);
+  
+  const adjustedBullish = bot.bullishThreshold + modifiers.thresholdModifier;
+  
+  let opinion: 'bullish' | 'bearish' | 'neutral';
+  let confidence: number;
+  
+  if (weightedScore >= adjustedBullish) {
+    opinion = 'bullish';
+    confidence = Math.min(95, 50 + (weightedScore - adjustedBullish) * 1.5);
+  } else if (weightedScore < bot.bearishThreshold) {
+    opinion = 'bearish';
+    confidence = Math.min(95, 50 + (bot.bearishThreshold - weightedScore) * 1.5);
+  } else {
+    opinion = 'neutral';
+    confidence = 45;
+  }
+  
+  // Overrides
+  if (botId === 'sterling' && exitAnalysis && (!exitAnalysis.canExit || exitAnalysis.liquidityRisk === 'extreme')) {
+    opinion = 'bearish'; confidence = 90;
+  }
+  if (botId === 'chad' && narrative?.narrativeType === 'dead') {
+    if (opinion === 'bullish') { opinion = 'neutral'; confidence *= 0.5; }
+  }
+  if (narrative?.isLikelyScam) { opinion = 'bearish'; confidence = 85; }
+  
+  let positionMultiplier = modifiers.positionSizeModifier;
+  if (confidence < 50) positionMultiplier *= 0.6;
+  positionMultiplier = Math.max(0.3, Math.min(1.5, positionMultiplier));
+  
+  return { opinion, confidence: Math.round(confidence), positionMultiplier, mentalNote: modifiers.mentalNote || '' };
 }
 
 // ============================================================
-// MAIN ANALYSIS
+// MAIN ANALYSIS — Real conversations
 // ============================================================
 
 async function analyzeToken(token: Token): Promise<void> {
@@ -466,411 +471,339 @@ async function analyzeToken(token: Token): Promise<void> {
   currentToken = token;
   setCurrentTokenInBus(token);
   sentMessages.clear();
-
   const chat: string[] = [];
 
   try {
     broadcastNewToken(token);
-
-    await sleep(1500);
+    await systemMsg(`🔍 Analyzing $${token.symbol}...`);
+    
+    // ========== SEQUENTIAL ANALYSIS — Avoid rate limiting ==========
+    console.log(`📊 Fetching data for $${token.symbol}...`);
+    
+    // Step 1: Technical Analysis (uses nadapp API)
+    console.log(`   1/3 Technical analysis...`);
     const ta = await analyzeTechnicals(token.address);
-    await sleep(2000);
-    const { score: riskScore, flags } = await calculateRiskScore(token);
     
-    const scores = calculateScores(token, ta, riskScore, flags);
-    const summary = scores.taSummary;
+    // Step 2: Risk Score (uses nadapp API with cache)
+    console.log(`   2/3 Risk assessment...`);
+    const riskResult = await calculateRiskScore(token);
     
-    const opinions: Record<BotId, 'bullish' | 'bearish' | 'neutral'> = {
-      chad: calculateBotOpinion('chad', scores),
-      quantum: calculateBotOpinion('quantum', scores),
-      sensei: calculateBotOpinion('sensei', scores),
-      sterling: calculateBotOpinion('sterling', scores),
-      oracle: calculateBotOpinion('oracle', scores),
-    };
+    // Step 3: Social Context (uses nad.fun API + Grok)
+    console.log(`   3/3 Social analysis...`);
+    const socialContext = await getFullSocialContext(token);
+    
+    const narrative = socialContext.narrative;
+    const exitAnalysis = analyzeExitLiquidity(token, 1);
+    const scores = calculateScores(token, ta, narrative, exitAnalysis);
+    
+    // Calculate all opinions
+    const opinions: Record<BotId, 'bullish' | 'bearish' | 'neutral'> = {} as any;
+    const details: Record<BotId, { confidence: number; positionMultiplier: number }> = {} as any;
+    
+    for (const botId of ALL_BOT_IDS) {
+      const result = calculateBotOpinion(botId, scores, narrative, exitAnalysis);
+      opinions[botId] = result.opinion;
+      details[botId] = { confidence: result.confidence, positionMultiplier: result.positionMultiplier };
+    }
 
-    // Real token data
     const sym = token.symbol;
-    const price = formatPrice(token.price);
-    const mcap = formatMcap(token.mcap);
-    const holders = token.holders.toLocaleString();
-    const lpPct = ((token.liquidity / token.mcap) * 100).toFixed(1);
+    const price = token.price >= 1 ? `$${token.price.toFixed(2)}` : `$${token.price.toFixed(6)}`;
+    const mcap = token.mcap >= 1_000_000 ? `${(token.mcap / 1_000_000).toFixed(1)}M` : `${(token.mcap / 1000).toFixed(0)}K`;
 
-    // =========================================================
-    // PHASE 1: James alerts
-    // =========================================================
+    // ========== PHASE 1: JAMES SPOTS IT ==========
+    const jamesContext = `New token spotted: $${sym}
+Price: ${price}, Mcap: ${mcap}, Holders: ${token.holders.toLocaleString()}
 
-    const msg1 = await generate('chad', `
-Alert: $${sym} on Monad
+QUICK TECHNICALS:
+- RSI: ${ta?.rsi?.toFixed(0) || 'N/A'} ${ta?.rsiSignal === 'oversold' ? '(oversold 👀)' : ta?.rsiSignal === 'overbought' ? '(overbought)' : ''}
+- Trend: ${ta?.trend?.replace(/_/g, ' ') || 'unclear'}
+- Volume: ${ta?.volumeSpike ? `PUMPING ${ta.volumeRatio?.toFixed(1)}x 🔥` : 'chill'}
+${ta?.whaleActivity === 'buying' ? '- Whales loading 🐋' : ta?.whaleActivity === 'selling' ? '- Whales dumping ⚠️' : ''}
 
-REAL DATA (use these exact numbers):
-- Price: ${price}
-- Mcap: ${mcap}
-- Holders: ${holders}
-- Your vibe: ${opinions.chad}
+TWITTER DATA:
+${narrative?.officialTwitter ? `- Official Twitter: ${narrative.officialTwitter} (${narrative.officialTwitterActive ? 'ACTIVE ✅' : 'INACTIVE ⚠️'})` : '- No official Twitter found ❌'}
+${narrative ? `- CT Mentions: ${narrative.mentionCount}` : ''}
+${narrative ? `- Sentiment: ${narrative.sentimentOnX}` : ''}
+${narrative?.recentTweets?.length ? `- Recent tweet: "${narrative.recentTweets[0]?.slice(0, 80)}..."` : ''}
+${narrative?.topAccounts?.length ? `- Accounts talking: ${narrative.topAccounts.slice(0, 3).join(', ')}` : ''}
+${narrative?.redFlags?.length ? `- RED FLAGS: ${narrative.redFlags.join(', ')}` : ''}
 
-Alert the group naturally. Pick 1-2 stats that excite you.
-DON'T list everyone's names. 12-20 words max.
-    `, chat);
-    
+Your opinion: ${opinions.chad} (${details.chad.confidence}% confident)
+
+IMPORTANT: Explain WHY you feel this way. Cite specific numbers like "RSI at ${ta?.rsi?.toFixed(0)}", "${token.holders} holders", "mcap ${mcap}". Don't just say bullish/bearish.`;
+
+    const msg1 = await botSpeak('chad', jamesContext, chat);
     await say('chad', msg1);
     chat.push(`James: ${msg1}`);
-    await sleep(4000);
+    await sleep(3500);
 
-    // =========================================================
-    // PHASE 2: Keone TA
-    // =========================================================
+    // ========== PHASE 2: KEONE WITH TA + TWITTER CORRELATION ==========
+    const keoneContext = `$${sym} technical breakdown.
 
-    const keonePoints = summary.forKeone.slice(0, 3);
-    const msg2 = await generate('quantum', `
-$${sym} - giving my TA.
+TECHNICAL DATA:
+- RSI: ${ta?.rsi?.toFixed(0) || 'N/A'} ${ta?.rsiSignal === 'overbought' ? '(OVERBOUGHT ⚠️)' : ta?.rsiSignal === 'oversold' ? '(OVERSOLD 🔥)' : ''}
+- Trend: ${ta?.trend?.replace(/_/g, ' ') || 'unclear'}
+- MAs: ${ta?.maSignal || 'N/A'} ${ta?.maCrossover === 'golden_cross' ? '(GOLDEN CROSS 📈)' : ta?.maCrossover === 'death_cross' ? '(DEATH CROSS 📉)' : ''}
+- Price vs MAs: ${ta?.priceVsMa === 'above_all' ? 'Above all MAs ✅' : ta?.priceVsMa === 'below_all' ? 'Below all MAs ❌' : 'Mixed'}
+- Volume: ${ta?.volumeSpike ? `SPIKE ${ta.volumeRatio?.toFixed(1)}x 📈` : 'normal'} (${ta?.volumeTrend || 'stable'})
+- OBV: ${ta?.obvTrend === 'accumulation' ? 'ACCUMULATION 🐋' : ta?.obvTrend === 'distribution' ? 'DISTRIBUTION ⚠️' : 'neutral'}
+${ta?.whaleActivity && ta.whaleActivity !== 'none' ? `- Whale flow: ${ta.whaleActivity.toUpperCase()} 🐋` : ''}
+${ta?.bullishFactors?.length ? `- Bullish: ${ta.bullishFactors.slice(0, 2).join(', ')}` : ''}
+${ta?.bearishFactors?.length ? `- Bearish: ${ta.bearishFactors.slice(0, 2).join(', ')}` : ''}
+- Signal: ${ta?.signal?.toUpperCase() || 'HOLD'} (${ta?.confidence || 50}%)
 
-REAL DATA:
-- Price: ${price}
-- Mcap: ${mcap}
+SOCIAL: Narrative ${narrative?.narrativeScore || '?'}/100, Social ${narrative?.socialScore || '?'}/100
 
-MY TA FINDINGS (pick 2-3):
-${keonePoints.map(p => '• ' + p).join('\n')}
-${summary.patterns.length > 0 ? '• Patterns: ' + summary.patterns.join(', ') : ''}
+Your opinion: ${opinions.quantum} (${details.quantum.confidence}%)
 
-I'm ${opinions.quantum}. Give technical analysis.
-Use REAL price ${price} if mentioning levels.
-DON'T start with names. 18-28 words.
-    `, chat);
-    
+IMPORTANT: Give specific TA analysis. Say things like "RSI at ${ta?.rsi?.toFixed(0)} suggests X", "volume ${ta?.volumeRatio?.toFixed(1)}x average means Y". Explain what the indicators tell you.`;
+
+    const msg2 = await botSpeak('quantum', keoneContext, chat, { name: 'James', message: msg1 });
     await say('quantum', msg2);
     chat.push(`Keone: ${msg2}`);
-    await sleep(4500);
+    await sleep(3500);
 
-    // =========================================================
-    // PHASE 3: James follow-up
-    // =========================================================
-
-    const msg3 = await generate('chad', `
-Keone gave TA on $${sym}.
-
-React naturally or ask a quick question. 
-DON'T just say "Keone," - be natural. 8-14 words.
-
-Keone said: "${msg2}"
-    `, chat);
-    
+    // ========== PHASE 3: JAMES RESPONDS TO KEONE ==========
+    const msg3 = await botSpeak('chad', `$${sym} discussion. You're ${opinions.chad}.`, chat, { name: 'Keone', message: msg2 });
     await say('chad', msg3);
     chat.push(`James: ${msg3}`);
     await sleep(3000);
 
-    // =========================================================
-    // PHASE 4: Portdev community
-    // =========================================================
+    // ========== PHASE 4: PORTDEV ON COMMUNITY ==========
+    const portdevContext = `$${sym} community analysis.
 
-    const portdevPoints = summary.forPortdev.slice(0, 2);
-    const msg4 = await generate('sensei', `
-$${sym} discussion.
+HOLDER DATA:
+- Total holders: ${token.holders.toLocaleString()}
+- Phase: ${narrative?.narrativeTiming === 'early' ? 'Early stage 🌱' : narrative?.narrativeTiming === 'peak' ? 'Peak attention 🔥' : narrative?.narrativeTiming === 'late' ? 'Late stage ⚠️' : 'Unknown'}
 
-MY COMMUNITY INSIGHTS:
-${portdevPoints.map(p => '• ' + p).join('\n')}
+TWITTER PRESENCE:
+${narrative?.officialTwitter ? `- Official: ${narrative.officialTwitter} (${narrative.officialTwitterActive ? 'ACTIVE - posting regularly ✅' : 'INACTIVE - not posting ⚠️'})` : '- NO official Twitter ❌'}
+${narrative?.hasActiveCommunity ? '- Community: ACTIVE on CT ✅' : '- Community: QUIET ⚠️'}
+${narrative?.mentionCount ? `- Mentions: ${narrative.mentionCount}` : ''}
+${narrative?.topAccounts?.length ? `- Talking about it: ${narrative.topAccounts.join(', ')}` : '- No notable accounts talking'}
+${socialContext.knownTraders.knownTraders.length ? `- Known traders: ${socialContext.knownTraders.knownTraders.join(', ')}` : ''}
+${socialContext.knownTraders.influencerMentions ? '- Influencer mentions: YES 📢' : ''}
+${socialContext.knownTraders.whaleAlert ? '- Whale interest: YES 🐋' : ''}
 
-I'm ${opinions.sensei}. Add community perspective.
-DON'T start by listing names. Be natural. 14-22 words.
+Your opinion: ${opinions.sensei} (${details.sensei.confidence}%)
 
-Recent chat:
-${chat.slice(-2).join('\n')}
-    `, chat);
-    
+IMPORTANT: Explain the community situation. Say "${token.holders} holders is X for this mcap", "Twitter ${narrative?.officialTwitterActive ? 'active' : 'inactive'} means Y". Give your read on the community strength.`;
+
+    const msg4 = await botSpeak('sensei', portdevContext, chat);
     await say('sensei', msg4);
     chat.push(`Portdev: ${msg4}`);
-    await sleep(4000);
+    await sleep(3500);
 
-    // =========================================================
-    // PHASE 5: Harpal risk
-    // =========================================================
+    // ========== PHASE 5: SOMEONE RESPONDS TO PORTDEV ==========
+    const responder = Math.random() > 0.5 ? 'chad' : 'quantum';
+    const msg5 = await botSpeak(responder, `$${sym}. You're ${opinions[responder]}.`, chat, { name: 'Portdev', message: msg4 });
+    await say(responder, msg5);
+    chat.push(`${BOTS[responder].name}: ${msg5}`);
+    await sleep(3000);
 
-    const harpalPoints = summary.forHarpal.slice(0, 2);
-    const msg5 = await generate('sterling', `
-$${sym} risk check.
+    // ========== PHASE 6: HARPAL RISK CHECK ==========
+    const harpalContext = `$${sym} risk assessment.
 
-MY RISK FINDINGS:
-${harpalPoints.map(p => '• ' + p).join('\n')}
+LIQUIDITY RISK:
+- Exit difficulty: ${exitAnalysis.exitDifficulty}
+- Price impact if sell: ${exitAnalysis.priceImpactPercent.toFixed(1)}%
+- Max safe position: ${exitAnalysis.recommendedPositionMON.toFixed(1)} MON
+- LP ratio: ${((token.liquidity / token.mcap) * 100).toFixed(1)}%
+- Liquidity: $${token.liquidity.toLocaleString()}
+${exitAnalysis.warnings.length ? `- Warnings: ${exitAnalysis.warnings.join(', ')}` : ''}
 
-I'm ${opinions.sterling}. Give risk perspective.
-DON'T start with "James, Keone, Portdev" - just talk naturally.
-If setup looks ok, say so. 16-24 words.
+SOCIAL RISK:
+${narrative?.isLikelyScam ? '⚠️ SCAM SIGNALS DETECTED' : '- No scam signals'}
+${narrative?.isBeingRaided ? '⚠️ Coordinated shilling detected' : ''}
+${narrative?.redFlags?.length ? `- Red flags: ${narrative.redFlags.join(', ')}` : '- No red flags'}
+${!narrative?.officialTwitter ? '⚠️ No Twitter = harder to verify legitimacy' : ''}
+${narrative?.officialTwitter && !narrative?.officialTwitterActive ? '⚠️ Inactive Twitter = possible abandoned project' : ''}
 
-Recent:
-${chat.slice(-2).join('\n')}
-    `, chat);
-    
-    await say('sterling', msg5);
-    chat.push(`Harpal: ${msg5}`);
-    await sleep(4000);
+Your opinion: ${opinions.sterling} (${details.sterling.confidence}%)
 
-    // =========================================================
-    // PHASE 6: Debate if needed
-    // =========================================================
+IMPORTANT: Explain the risks with numbers. Say "only $${token.liquidity.toLocaleString()} liquidity means X", "${exitAnalysis.priceImpactPercent.toFixed(1)}% slippage is Y", "LP ratio ${((token.liquidity / token.mcap) * 100).toFixed(1)}% suggests Z".`;
 
+    const msg6 = await botSpeak('sterling', harpalContext, chat);
+    await say('sterling', msg6);
+    chat.push(`Harpal: ${msg6}`);
+    await sleep(3500);
+
+    // ========== PHASE 7: DEBATE IF SPLIT ==========
     const bulls = ALL_BOT_IDS.filter(b => opinions[b] === 'bullish');
     const bears = ALL_BOT_IDS.filter(b => opinions[b] === 'bearish');
-
+    
     if (bulls.length > 0 && bears.length > 0) {
+      // Bull pushes back
       const bull = bulls[0];
       const bear = bears[0];
-
-      const bullArg = await generate(bull, `
-You're bullish on $${sym}. ${BOTS[bear].name} seems cautious.
-
-Push back with ONE good point. Don't list names. 10-18 words.
-
-${BOTS[bear].name}'s concern: "${chat[chat.length - 1].split(': ')[1]}"
-      `, chat);
       
+      const bullArg = await botSpeak(bull, `You're bullish on $${sym}. ${BOTS[bear].name} seems skeptical.`, chat, 
+        { name: BOTS[bear].name, message: chat[chat.length - 1].split(': ')[1] });
       await say(bull, bullArg);
       chat.push(`${BOTS[bull].name}: ${bullArg}`);
-      await sleep(3500);
+      await sleep(3000);
 
-      const bearResp = await generate(bear, `
-${BOTS[bull].name} pushed back: "${bullArg}"
-
-Respond - concede if valid, or maintain position.
-Don't start with their name. 10-18 words.
-      `, chat);
-      
+      // Bear responds
+      const bearResp = await botSpeak(bear, `$${sym} debate. You're ${opinions[bear]}.`, chat,
+        { name: BOTS[bull].name, message: bullArg });
       await say(bear, bearResp);
       chat.push(`${BOTS[bear].name}: ${bearResp}`);
       
-      if (bearResp.toLowerCase().match(/fair|point|true|right|agree|fine|valid|maybe/)) {
+      // Check if bear concedes
+      if (bearResp.toLowerCase().match(/fair|point|true|agree|valid|maybe|fine|ok/)) {
         if (opinions[bear] === 'bearish') opinions[bear] = 'neutral';
       }
-      await sleep(3500);
-    }
-
-    // Someone else adds quick thought
-    const others = ALL_BOT_IDS.filter(b => b !== 'oracle' && !chat.some(c => c.startsWith(BOTS[b].name) && chat.indexOf(c) > chat.length - 3));
-    if (others.length > 0) {
-      const other = others[Math.floor(Math.random() * others.length)];
-      const extra = await generate(other, `
-$${sym} discussion. Add a brief fresh thought.
-Don't repeat what was said. Don't list names. 8-14 words.
-
-Recent:
-${chat.slice(-2).join('\n')}
-      `, chat);
-      
-      await say(other, extra);
-      chat.push(`${BOTS[other].name}: ${extra}`);
       await sleep(3000);
+
+      // Third person jumps in
+      const others = ALL_BOT_IDS.filter(b => b !== bull && b !== bear && b !== 'oracle');
+      if (others.length > 0) {
+        const third = others[Math.floor(Math.random() * others.length)];
+        const thirdMsg = await botSpeak(third, `$${sym} debate ongoing. Your take: ${opinions[third]}`, chat);
+        await say(third, thirdMsg);
+        chat.push(`${BOTS[third].name}: ${thirdMsg}`);
+        await sleep(3000);
+      }
     }
 
-    // =========================================================
-    // PHASE 7: Mike verdict
-    // =========================================================
+    // ========== PHASE 8: MIKE'S VERDICT ==========
+    const allAgree = bulls.length >= 4 || bears.length >= 4;
+    const mikeContext = `$${sym} - final synthesis.
 
-    const mikePoints = summary.forMike.slice(0, 2);
-    const mikeMsg = await generate('oracle', `
-$${sym} - time for verdict.
+SCORES:
+- Overall: ${scores.overall.toFixed(0)}/100
+- Narrative: ${narrative?.narrativeScore || '?'}/100
+- Social: ${narrative?.socialScore || '?'}/100
+- TA Signal: ${ta?.signal || 'hold'}
 
-MY HIDDEN INSIGHTS:
-${mikePoints.map(p => '• ' + p).join('\n')}
+HIDDEN PATTERNS:
+${narrative?.notableTraders?.length ? `- Traders spotted: ${narrative.notableTraders.join(', ')}` : '- No notable traders'}
+${socialContext.knownTraders.whaleAlert ? '- Whale accumulation detected 🐋' : ''}
+${narrative?.narrativeTiming === 'early' ? '- Early narrative - potential opportunity' : ''}
+${narrative?.narrativeTiming === 'late' ? '- Late narrative - exit liquidity risk' : ''}
+${allAgree ? `- WARNING: ${bulls.length >= 4 ? 'All bullish' : 'All bearish'} - contrarian signal?` : ''}
+- Council split: ${bulls.length} bulls, ${bears.length} bears
 
-Score: ${scores.overall.toFixed(0)}/100
-I'm ${opinions.oracle}.
+Your opinion: ${opinions.oracle} (${details.oracle.confidence}%)
 
-Cryptic but clear direction. Don't list names. 8-14 words.
-    `, chat);
-    
-    await say('oracle', mikeMsg);
-    chat.push(`Mike: ${mikeMsg}`);
-    await sleep(3500);
+IMPORTANT: Give cryptic but data-backed insight. Reference the ${scores.overall.toFixed(0)}/100 score, the ${bulls.length}/${ALL_BOT_IDS.length} council split, or patterns others missed. Be mysterious but grounded in the numbers.`;
 
-    // =========================================================
-    // PHASE 8: Quick reaction
-    // =========================================================
+    const msg8 = await botSpeak('oracle', mikeContext, chat);
+    await say('oracle', msg8);
+    chat.push(`Mike: ${msg8}`);
+    await sleep(3000);
 
+    // ========== PHASE 9: QUICK REACTIONS ==========
     const reactor = Math.random() > 0.5 ? 'chad' : 'sensei';
-    const reaction = await generate(reactor, `
-Mike said: "${mikeMsg}"
-
-Quick natural reaction. 5-10 words. Don't start with "Mike,".
-    `, chat);
-    
+    const reaction = await botSpeak(reactor, `Mike just spoke on $${sym}.`, chat, { name: 'Mike', message: msg8 });
     await say(reactor, reaction);
     await sleep(2500);
 
-    // =========================================================
-    // PHASE 9: Vote
-    // =========================================================
-
-    await systemMsg(`🗳️ Vote on $${sym}`);
+    // ========== PHASE 10: VOTE ==========
+    await systemMsg(`🗳️ Council votes on $${sym}`);
     await sleep(2000);
 
     for (const botId of ALL_BOT_IDS) {
       const op = opinions[botId];
+      const conf = details[botId].confidence;
       const emoji = op === 'bullish' ? '🟢' : op === 'bearish' ? '🔴' : '⚪';
-      const word = op === 'bullish' ? 'in' : op === 'bearish' ? 'out' : 'pass';
-      await say(botId, `${emoji} ${word}`);
+      const voteText = op === 'bullish' ? 'IN' : op === 'bearish' ? 'OUT' : 'PASS';
+      await sayVote(botId, `${emoji} ${voteText} (${conf}%)`);
       await sleep(800);
     }
 
+    // ========== VERDICT ==========
     const finalBulls = ALL_BOT_IDS.filter(b => opinions[b] === 'bullish');
-    const verdict: 'buy' | 'pass' = finalBulls.length >= 2 ? 'buy' : 'pass';
+    const avgConf = finalBulls.length > 0 ? finalBulls.reduce((s, b) => s + details[b].confidence, 0) / finalBulls.length : 0;
+    const harpalVeto = opinions.sterling === 'bearish' && exitAnalysis.liquidityRisk === 'extreme';
+    const verdict: 'buy' | 'pass' = (finalBulls.length >= 2 && avgConf >= 55 && !harpalVeto) ? 'buy' : 'pass';
 
     await sleep(1500);
-    await systemMsg(`📊 ${verdict.toUpperCase()} (${finalBulls.length}/5) | Score: ${scores.overall.toFixed(0)}/100`);
+    if (harpalVeto) await systemMsg(`🚫 VETOED by Harpal - Exit liquidity too risky`);
+    await systemMsg(`📊 ${verdict.toUpperCase()} (${finalBulls.length}/5 @ ${avgConf.toFixed(0)}% avg)`);
 
-    await saveToken(token, { tokenAddress: token.address, riskScore, flags, verdict, opinions: opinions as any });
+    await saveToken(token, { tokenAddress: token.address, riskScore: riskResult.score, flags: riskResult.flags, verdict, opinions: opinions as any });
     broadcastVerdict(token, verdict, opinions);
 
-    // =========================================================
-    // TRADES
-    // =========================================================
-
+    // ========== EXECUTE TRADES ==========
     if (verdict === 'buy') {
       await sleep(2000);
-
       for (const botId of finalBulls) {
         const { allowed, reason } = await canBotTrade(botId);
-        if (!allowed) {
-          await say(botId, `wanted in but ${reason}`);
-          continue;
-        }
-
+        if (!allowed) { await say(botId, `wanted in but ${reason}`); continue; }
+        
         const balance = await getBotBalance(botId);
         if (balance < 1) continue;
+        
+        const baseSize = calculateTradeSize(botId, balance, Math.min(85, scores.overall));
+        const finalSize = Math.min(baseSize * details[botId].positionMultiplier, exitAnalysis.recommendedPositionMON);
+        if (finalSize < 0.3) continue;
 
-        const size = calculateTradeSize(botId, balance, Math.min(85, scores.overall));
-        if (size < 0.3) continue;
-
-        await say(botId, `aping ${size.toFixed(1)} MON 🎯`);
+        await say(botId, `aping ${finalSize.toFixed(1)} MON 🎯`);
         await sleep(1200);
-
-        const trade = await executeBotTrade(botId, token, size, 'buy');
-
+        
+        const trade = await executeBotTrade(botId, token, finalSize, 'buy');
         if (trade?.status === 'confirmed') {
-          await createPosition({
-            botId,
-            tokenAddress: token.address,
-            tokenSymbol: token.symbol,
-            amount: trade.amountOut,
-            entryPrice: token.price,
-            entryValueMon: size,
-            entryTxHash: trade.txHash,
-          });
-          await say(botId, `scooped ${trade.amountOut.toFixed(0)} $${token.symbol} ✅`);
+          await createPosition({ botId, tokenAddress: token.address, tokenSymbol: token.symbol, amount: trade.amountOut, entryPrice: token.price, entryValueMon: finalSize, entryTxHash: trade.txHash });
+          await say(botId, `got ${trade.amountOut.toFixed(0)} $${sym} ✅`);
         } else {
-          await say(botId, `tx failed`);
+          await say(botId, `tx failed 😤`);
         }
         await sleep(1500);
       }
     }
 
   } catch (error) {
-    console.error('Analysis error:', error);
+    console.error('❌ Analysis error:', error);
+    // Broadcast l'erreur pour debugging
+    await systemMsg(`⚠️ Analysis interrupted`);
   } finally {
     isAnalyzing = false;
+    console.log(`✅ Analysis complete for ${token?.symbol || 'unknown'}`);
   }
 }
 
 // ============================================================
-// MESSAGE GENERATION — Anti-duplicate, no name lists
-// ============================================================
-
-async function generate(botId: BotId, prompt: string, chat: string[]): Promise<string> {
-  const bot = BOTS[botId];
-  
-  const systemPrompt = `You are ${bot.name}, a crypto trader in a group chat.
-
-STYLE: ${bot.style}
-
-ABSOLUTE RULES:
-1. NEVER start messages with lists of names like "James, Keone, Portdev,"
-2. NEVER start with "yo", "hey", "oh", "so", "well", "look"
-3. If responding to someone, either use their name naturally mid-sentence OR don't use it at all
-4. Keep it natural like a real group chat
-5. Use ONLY the real prices/numbers given to you - never invent prices
-6. Don't repeat what others already said
-
-BAD: "James, Keone, the RSI looks good"
-BAD: "Guys, the chart shows..."
-GOOD: "RSI at 66 shows momentum, and that holder count backs it up"
-GOOD: "That's a solid setup - 31K holders don't lie"`;
-
-  try {
-    const res = await grok.chat.completions.create({
-      model: 'grok-3-latest',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt }
-      ],
-      max_tokens: 85,
-      temperature: 1.0,
-    });
-
-    let text = res.choices[0]?.message?.content || '';
-    
-    // Clean up common issues
-    text = text.replace(/^(yo|hey|oh|so|well|look|okay|guys),?\s*/i, '');
-    // Remove name lists at start
-    text = text.replace(/^(james|keone|portdev|harpal|mike)(,\s*(james|keone|portdev|harpal|mike))+,?\s*/i, '');
-    
-    return text.trim().slice(0, 220);
-  } catch (e) {
-    console.error(`Error for ${botId}:`, e);
-    return 'interesting setup';
-  }
-}
-
-// ============================================================
-// SAY — With duplicate prevention
+// HELPERS
 // ============================================================
 
 async function say(botId: BotId, content: string): Promise<void> {
   if (!content || content.length < 2) return;
-  
-  // Normalize for duplicate check
   const normalized = content.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 50);
-  if (sentMessages.has(normalized)) {
-    console.log(`Skipping duplicate: ${content.slice(0, 30)}...`);
-    return;
-  }
+  if (sentMessages.has(normalized)) return;
   sentMessages.add(normalized);
 
-  const msg: Message = {
-    id: randomUUID(),
-    botId,
-    content,
-    token: currentToken?.address,
-    messageType: 'chat',
-    createdAt: new Date(),
-  };
+  const msg: Message = { id: randomUUID(), botId, content, token: currentToken?.address, messageType: 'chat', createdAt: new Date() };
+  await saveMessage(msg);
+  broadcastMessage(msg);
+}
+
+// Vote messages should never be filtered - each bot must vote
+async function sayVote(botId: BotId, content: string): Promise<void> {
+  if (!content || content.length < 2) return;
+  const msg: Message = { id: randomUUID(), botId, content, token: currentToken?.address, messageType: 'vote', createdAt: new Date() };
   await saveMessage(msg);
   broadcastMessage(msg);
 }
 
 async function systemMsg(content: string): Promise<void> {
-  const msg: Message = {
-    id: randomUUID(),
-    botId: 'system' as any,
-    content,
-    messageType: 'system',
-    createdAt: new Date(),
-  };
+  const msg: Message = { id: randomUUID(), botId: 'system' as any, content, messageType: 'system', createdAt: new Date() };
   await saveMessage(msg);
   broadcastMessage(msg);
 }
 
 async function handleHumanMessage(data: { address: string; content: string }): Promise<void> {
-  const msg: Message = {
-    id: randomUUID(),
-    botId: `human_${data.address}`,
-    content: data.content,
-    token: currentToken?.address,
-    messageType: 'chat',
-    createdAt: new Date(),
-  };
+  const msg: Message = { id: randomUUID(), botId: `human_${data.address}`, content: data.content, token: currentToken?.address, messageType: 'chat', createdAt: new Date() };
   await saveMessage(msg);
   broadcastMessage(msg);
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
+}
+
+export function recordTradeOutcome(botId: BotId, outcome: 'win' | 'loss', pnl: number, positionSize: number): void {
+  recordTradeResult(botId, outcome, pnl, (positionSize / 10) * 100);
 }
 
 export { currentToken, isAnalyzing };
