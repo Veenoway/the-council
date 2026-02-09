@@ -22,15 +22,15 @@ positionsRouter.get('/', async (c) => {
     });
 
     // Fetch prices once per unique token
-    const tokenAddresses = [...new Set(positions.map(p => p.tokenAddress))];
+    const tokenAddresses = [...new Set(positions.map((p: any) => p.tokenAddress))];
     const prices: Record<string, number> = {};
 
     for (const addr of tokenAddresses) {
-      prices[addr] = (await getTokenPrice(addr)) || 0;
+      prices[addr as string] = (await getTokenPrice(addr as string)) || 0;
     }
 
     // Enrich positions
-    const enriched = positions.map(p => {
+    const enriched = positions.map((p: any) => {
       const amount = Number(p.amount);
       const currentPrice = prices[p.tokenAddress] || 0;
       
@@ -66,10 +66,10 @@ positionsRouter.get('/', async (c) => {
     // Group by bot - create portfolios
     const portfolios = ALL_BOT_IDS.map((botId: BotId) => {
       const config = getBotConfig(botId);
-      const botPositions = enriched.filter(p => p.botId === botId);
+      const botPositions = enriched.filter((p: any) => p.botId === botId);
 
-      const totalInvested = botPositions.reduce((sum, p) => sum + p.entryValueMON, 0);
-      const totalValue = botPositions.reduce((sum, p) => sum + p.currentValueMON, 0);
+      const totalInvested = botPositions.reduce((sum: any, p: any) => sum + p.entryValueMON, 0);
+      const totalValue = botPositions.reduce((sum: any, p: any) => sum + p.currentValueMON, 0);
       const totalPnl = totalValue - totalInvested;
       const totalPnlPercent = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
 
@@ -86,8 +86,8 @@ positionsRouter.get('/', async (c) => {
     });
 
     // Council totals
-    const totalInvested = enriched.reduce((sum, p) => sum + p.entryValueMON, 0);
-    const totalValue = enriched.reduce((sum, p) => sum + p.currentValueMON, 0);
+    const totalInvested = enriched.reduce((sum: any, p: any) => sum + p.entryValueMON, 0);
+    const totalValue = enriched.reduce((sum: any, p: any) => sum + p.currentValueMON, 0);
     const totalPnl = totalValue - totalInvested;
     const totalPnlPercent = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
 
@@ -122,8 +122,8 @@ positionsRouter.get('/history', async (c) => {
       take: limit,
     });
 
-    const enriched = positions.map((p) => {
-      const config = getBotConfig(p.botId as any);
+    const enriched = positions.map((p: any) => {
+      const config = getBotConfig(p.botId as any) as any;
 
       return {
         id: p.id,
@@ -164,7 +164,7 @@ positionsRouter.get('/token/:address', async (c) => {
 
     const currentPrice = (await getTokenPrice(tokenAddress)) || 0;
 
-    const enriched = positions.map((p) => {
+    const enriched = positions.map((p: any) => {
       const amount = Number(p.amount);
       const entryValueMON = Number(p.entryValueMon) || 0;
       const config = getBotConfig(p.botId as any);

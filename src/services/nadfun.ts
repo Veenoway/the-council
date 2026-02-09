@@ -504,6 +504,7 @@ export interface WalletHolding {
   valueUsd: number;
   valueMon: number;
   priceUsd: number;
+  priceMon: number;
 }
 
 export async function getWalletHoldings(walletAddress: string): Promise<WalletHolding[]> {

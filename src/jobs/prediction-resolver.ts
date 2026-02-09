@@ -201,7 +201,7 @@ async function resolveBotROIPrediction(prediction: Prediction): Promise<number> 
     if (!response.ok) return 0;
 
     const data = await response.json();
-    const bots: BotStatsExtended[] = data.bots || [];
+    const bots: any[] = data.bots || [];
 
     if (bots.length === 0) return 0;
 

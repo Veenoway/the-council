@@ -55,7 +55,7 @@ export async function postMessage(
 ): Promise<Message> {
   const message: Message = {
     id: randomUUID(),
-    botId,
+    botId: botId as any,
     content,
     token: currentToken?.address,
     messageType: type,

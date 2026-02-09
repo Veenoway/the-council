@@ -1,7 +1,3 @@
-// ============================================================
-// STATS ROUTES — Daily stats, leaderboard
-// ============================================================
-
 import { Hono } from 'hono';
 import { prisma } from '../db/index.js';
 import { getTodayStats } from '../services/monitor.js';
@@ -23,19 +19,19 @@ statsRouter.get('/today', async (c) => {
       return {
         ...s,
         botName: config?.name || s.botId,
-        botAvatar: config?.avatar || '🤖',
-      };
+        botAvatar: config?.emoji || '🤖',
+      };    
     });
     
     // Add bots with no trades today
     const botsWithStats = new Set(stats.map(s => s.botId));
     for (const botId of ALL_BOT_IDS) {
       if (!botsWithStats.has(botId)) {
-        const config = getBotConfig(botId);
+        const config = getBotConfig(botId) as any;
         enriched.push({
           botId,
           botName: config?.name || botId,
-          botAvatar: config?.avatar || '🤖',
+          botAvatar: config?.emoji || '🤖',
           trades: 0,
           wins: 0,
           winrate: 0,
@@ -134,12 +130,12 @@ statsRouter.get('/overall', async (c) => {
       orderBy: { winRate: 'desc' },
     });
     
-    const enriched = stats.map(s => {
+    const enriched = stats.map((s: any) => {
       const config = getBotConfig(s.botId as any);
       return {
         botId: s.botId,
         botName: config?.name || s.botId,
-        botAvatar: config?.avatar || '🤖',
+        botAvatar: config?.emoji || '🤖',  
         totalTrades: s.totalTrades,
         wins: s.wins,
         losses: s.losses,
@@ -151,14 +147,14 @@ statsRouter.get('/overall', async (c) => {
     });
     
     // Add bots with no stats
-    const botsWithStats = new Set(stats.map(s => s.botId));
+    const botsWithStats = new Set(stats.map((s: any) => s.botId));
     for (const botId of ALL_BOT_IDS) {
       if (!botsWithStats.has(botId)) {
-        const config = getBotConfig(botId);
+        const config = getBotConfig(botId) as any;
         enriched.push({
           botId,
           botName: config?.name || botId,
-          botAvatar: config?.avatar || '🤖',
+          botAvatar: config?.emoji || '🤖',
           totalTrades: 0,
           wins: 0,
           losses: 0,
@@ -173,10 +169,10 @@ statsRouter.get('/overall', async (c) => {
     return c.json({
       bots: enriched,
       summary: {
-        totalTrades: enriched.reduce((sum, s) => sum + s.totalTrades, 0),
-        totalPnl: enriched.reduce((sum, s) => sum + s.totalPnl, 0),
-        bestWinRate: Math.max(...enriched.map(s => s.winRate)),
-        bestStreak: Math.max(...enriched.map(s => s.bestStreak)),
+        totalTrades: enriched.reduce((sum: any, s: any) => sum + s.totalTrades, 0),
+        totalPnl: enriched.reduce((sum: any, s: any) => sum + s.totalPnl, 0),
+        bestWinRate: Math.max(...enriched.map((s: any) => s.winRate)),
+        bestStreak: Math.max(...enriched.map((s: any) => s.bestStreak)),
       },
     });
   } catch (error) {

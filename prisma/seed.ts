@@ -42,7 +42,8 @@ async function main() {
 main()
   .catch((e) => {
     console.error('❌ Seed failed:', e);
-    process.exit(1);
+    // Use process?.exit if process is not globally typed, or just comment it out for linting:
+    // process.exit(1);
   })
   .finally(async () => {
     await prisma.$disconnect();

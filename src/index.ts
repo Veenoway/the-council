@@ -7,9 +7,10 @@ import { initWebSocket, closeWebSocket } from './services/websocket.js';
 import { startOrchestrator } from './services/orchestrator.js';
 import { getCurrentToken, getRecentMessages } from './services/messageBus.js';
 import { getWalletHoldings } from './services/nadfun.js';
-import { getBotConfig, ALL_BOT_IDS, type BotId } from './bots/personalities.js';
+import { getBotConfig, ALL_BOT_IDS,  } from './bots/personalities.js';
 import { getBotBalance, getBotWallet,  } from './services/trading.js';
 import { startPredictionsResolver } from './jobs/prediction-resolver.js';
+import { getRecentMessages as getRecentMessagesFromDB } from './db/index.js';
 
 // ============================================================
 // CONFIG
@@ -36,9 +37,17 @@ app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOStri
 // CURRENT STATE
 // ============================================================
 
-app.get('/api/current-token', (c) => {
+app.get('/api/current-token', async (c) => {
   const token = getCurrentToken();
-  const messages = getRecentMessages(50);
+  
+  // Get messages from memory first (live), fallback to DB
+  let messages = getRecentMessages(50);
+  
+  // If no messages in memory, fetch from DB (for SSR on cold start)
+  if (!messages || messages.length === 0) {
+    messages = await getRecentMessagesFromDB(10);
+  }
+  
   return c.json({ token: token || null, messages: messages || [], timestamp: new Date().toISOString() });
 });
 
@@ -57,15 +66,15 @@ app.get('/api/trades', async (c) => {
 
     // Don't fetch live prices here - use entry price for closed, 
     // frontend can fetch live prices separately if needed
-    const trades = positions.map(p => {
+    const trades = positions.map((p:any) => {
       const entryValue = Number(p.entryValueMon) || 0;
-      const config = getBotConfig(p.botId as BotId);
+      const config = getBotConfig(p.botId as any) as any;
 
       return {
         id: p.id,
         botId: p.botId,
         botName: config?.name || p.botId,
-        botAvatar: config?.avatar || '🤖',
+        botAvatar: config?.emoji || '🤖',
         botColor: config?.color || '#888',
         tokenAddress: p.tokenAddress,
         tokenSymbol: p.tokenSymbol,
@@ -99,13 +108,13 @@ app.get('/api/trades/live', async (c) => {
       take: 20,
     });
 
-    const trades = positions.map(p => {
-      const config = getBotConfig(p.botId as BotId);
+    const trades = positions.map((p: any) => {
+        const config = getBotConfig(p.botId as any) as any;
       return {
         id: p.id,
         botId: p.botId,
         botName: config?.name || p.botId,
-        botAvatar: config?.avatar || '🤖',
+        botAvatar: config?.emoji || '🤖',
         botColor: config?.color || '#888',
         tokenSymbol: p.tokenSymbol,
         tokenAddress: p.tokenAddress,
@@ -136,7 +145,7 @@ app.get('/api/tokens', async (c) => {
       take: limit,
     });
 
-    const enrichedTokens = tokens.map(t => ({
+    const enrichedTokens = tokens.map((t: any) => ({
       address: t.address,
       symbol: t.symbol,
       name: t.name,
@@ -166,8 +175,8 @@ app.get('/api/tokens/verdicts', async (c) => {
       take: 100,
     });
 
-    const buys = tokens.filter(t => t.verdict === 'buy');
-    const passes = tokens.filter(t => t.verdict === 'pass');
+    const buys = tokens.filter((t: any) => t.verdict === 'buy');
+    const passes = tokens.filter((t: any) => t.verdict === 'pass');
 
     return c.json({
       summary: {
@@ -176,13 +185,13 @@ app.get('/api/tokens/verdicts', async (c) => {
         passes: passes.length,
         buyRate: tokens.length > 0 ? Math.round((buys.length / tokens.length) * 100) : 0,
       },
-      recentBuys: buys.slice(0, 10).map(t => ({
+      recentBuys: buys.slice(0, 10).map((t: any) => ({
         symbol: t.symbol,
         address: t.address,
         riskScore: t.riskScore,
         analyzedAt: t.updatedAt,
       })),
-      recentPasses: passes.slice(0, 10).map(t => ({
+      recentPasses: passes.slice(0, 10).map((t: any) => ({
         symbol: t.symbol,
         address: t.address,
         riskScore: t.riskScore,
@@ -208,8 +217,8 @@ app.get('/api/tokens/analysis/:address', async (c) => {
       orderBy: { createdAt: 'desc' },
     });
 
-    const botsInvested = positions.filter(p => p.isOpen).map(p => {
-      const config = getBotConfig(p.botId as BotId);
+    const botsInvested = positions.filter((p: any) => p.isOpen).map((p: any) => {
+      const config = getBotConfig(p.botId as any) as any;
       return {
         botId: p.botId,
         botName: config?.name || p.botId,
@@ -235,7 +244,7 @@ app.get('/api/tokens/analysis/:address', async (c) => {
       },
       positions: {
         total: positions.length,
-        open: positions.filter(p => p.isOpen).length,
+        open: positions.filter((p: any) => p.isOpen).length,
         botsInvested,
       },
       timestamp: new Date().toISOString(),
@@ -297,7 +306,7 @@ app.get('/api/positions', async (c) => {
 
 
     // Enrich positions with current value and PnL
-    const enrichedPositions = positions.map(p => {
+    const enrichedPositions = positions.map((p:any) => {
       const entryValueMON = Number(p.entryValueMon) || 0;
       const entryPrice = Number(p.entryPrice) || 0;
       const dbAmount = Number(p.amount) || 0;
@@ -336,9 +345,9 @@ app.get('/api/positions', async (c) => {
     // Calculate portfolio totals per bot
     const portfolios = ALL_BOT_IDS.map(botId => {
       const config = getBotConfig(botId);
-      const botPositions = enrichedPositions.filter(p => p.botId === botId);
-      const totalInvested = botPositions.reduce((sum, p) => sum + p.entryValueMON, 0);
-      const totalCurrentValue = botPositions.reduce((sum, p) => sum + p.currentValueMON, 0);
+      const botPositions = enrichedPositions.filter((p:any) => p.botId === botId);
+      const totalInvested = botPositions.reduce((sum:any, p:any) => sum + p.entryValueMON, 0);
+      const totalCurrentValue = botPositions.reduce((sum:any, p:any ) => sum + p.currentValueMON, 0);
       const totalPnlMON = totalCurrentValue - totalInvested;
       const totalPnlPercent = totalInvested > 0 ? (totalPnlMON / totalInvested) * 100 : 0;
       
@@ -369,17 +378,17 @@ app.get('/api/bots', async (c) => {
   try {
     // Get closed positions from DB for win/loss stats
     const allPositions = await prisma.position.findMany();
-    const closedPositions = allPositions.filter(p => !p.isOpen);
+    const closedPositions = allPositions.filter((p:any) => !p.isOpen);
 
     const bots = await Promise.all(ALL_BOT_IDS.map(async (botId) => {
-      const config = getBotConfig(botId);
+      const config = getBotConfig(botId) as any;
       const walletAddress = getBotWallet(botId);
       
       // Get bot's closed positions for stats
-      const botClosedPositions = closedPositions.filter(p => p.botId === botId);
-      const realizedPnl = botClosedPositions.reduce((sum, p) => sum + (p.pnl ? Number(p.pnl) : 0), 0);
-      const wins = botClosedPositions.filter(p => p.pnl && Number(p.pnl) > 0).length;
-      const losses = botClosedPositions.filter(p => p.pnl && Number(p.pnl) <= 0).length;
+      const botClosedPositions = closedPositions.filter((p:any)  => p.botId === botId);
+      const realizedPnl = botClosedPositions.reduce((sum:any, p:any) => sum + (p.pnl ? Number(p.pnl) : 0), 0);
+      const wins = botClosedPositions.filter((p:any) => p.pnl && Number(p.pnl) > 0).length;
+      const losses = botClosedPositions.filter((p:any) => p.pnl && Number(p.pnl) <= 0).length;
 
       // Get balance
       let balance = 0;
@@ -427,13 +436,15 @@ app.get('/api/bots', async (c) => {
   }
 });
 
+
+
 app.get('/api/bots/:botId', async (c) => {
   try {
-    const botId = c.req.param('botId') as BotId;
+    const botId = c.req.param('botId') as any;
     const config = getBotConfig(botId);
     if (!config) return c.json({ error: 'Bot not found' }, 404);
 
-    const walletAddress = getBotWalletAddress(botId);
+    const walletAddress = getBotWallet(botId) as string;
     
     // Get closed positions from DB for stats
     const closedPositions = await prisma.position.findMany({ 
@@ -441,8 +452,8 @@ app.get('/api/bots/:botId', async (c) => {
       orderBy: { createdAt: 'desc' } 
     });
     
-    const realizedPnl = closedPositions.reduce((s, p) => s + (p.pnl ? Number(p.pnl) : 0), 0);
-    const wins = closedPositions.filter(p => p.pnl && Number(p.pnl) > 0).length;
+    const realizedPnl = closedPositions.reduce((s:any, p:any) => s + (p.pnl ? Number(p.pnl) : 0), 0);
+    const wins = closedPositions.filter((p:any) => p.pnl && Number(p.pnl) > 0).length;
 
     // Get balance
     let balance = 0;
@@ -472,8 +483,8 @@ app.get('/api/bots/:botId', async (c) => {
       bot: { 
         id: botId, 
         name: config.name, 
-        avatar: config.avatar, 
-        color: config.color, 
+        avatar: config.emoji, 
+        color: (config as any).color as any, 
         personality: config.personality,
         walletAddress: walletAddress || null,
       },
@@ -506,13 +517,13 @@ app.get('/api/bots/:botId', async (c) => {
 app.get('/api/stats', async (c) => {
   try {
     const allPositions = await prisma.position.findMany();
-    const closedPositions = allPositions.filter(p => !p.isOpen);
-    const totalPnl = closedPositions.reduce((s, p) => s + (p.pnl ? Number(p.pnl) : 0), 0);
-    const wins = closedPositions.filter(p => p.pnl && Number(p.pnl) > 0).length;
+    const closedPositions = allPositions.filter((p:any) => !p.isOpen);
+    const totalPnl = closedPositions.reduce((s:any, p:any) => s + (p.pnl ? Number(p.pnl) : 0), 0);
+    const wins = closedPositions.filter((p:any) => p.pnl && Number(p.pnl) > 0).length;
 
     return c.json({
       totalTrades: allPositions.length,
-      openPositions: allPositions.filter(p => p.isOpen).length,
+      openPositions: allPositions.filter((p:any) => p.isOpen).length,
       closedTrades: closedPositions.length,
       totalPnl: Math.round(totalPnl * 1000) / 1000,
       wins,

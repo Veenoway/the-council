@@ -149,3 +149,29 @@ model BotWallet {
 
   @@index([botId])
 }
+
+model Agent {
+  id            String   @id
+  name          String   @unique
+  apiKey        String   @unique
+  avatar        String?
+  color         String?
+  webhookUrl    String?
+  walletAddress String?
+  messagesCount Int      @default(0)
+  votesCount    Int      @default(0)
+  tradesCount   Int      @default(0)
+  correctVotes  Int      @default(0)
+  totalPnl      Decimal  @default(0)
+  isActive      Boolean  @default(true)
+  isOnline      Boolean  @default(false)
+}
+
+model AgentVote {
+  id           String   @id
+  agentId      String
+  tokenAddress String
+  vote         String   // bullish, bearish, neutral
+  confidence   Int
+  wasCorrect   Boolean?
+}

@@ -137,8 +137,8 @@ export async function runEnhancedCouncilAnalysis(
     );
     decisions[botId] = decision;
     
-    const config = getBotConfig(botId);
-    console.log(`   ${config?.avatar || '🤖'} ${config?.name || botId}: ${decision.opinion} (${decision.confidence}%)`);
+    const config = getBotConfig(botId) as any;
+    console.log(`   ${config?.emoji || '🤖'} ${config?.name || botId}: ${decision.opinion} (${decision.confidence}%)`);
   }
   
   // === STEP 3: Generate messages in character ===

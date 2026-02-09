@@ -37,7 +37,7 @@ botsRouter.get('/', async (c) => {
       return {
         botId,
         name: config?.name || botId,
-        imgURL: config?.imgURL || '',
+        emoji: config?.emoji || '🤖',
         personality: config?.personality || '',
         stats: stats ? {
           totalTrades: stats.totalTrades,
@@ -104,14 +104,13 @@ botsRouter.get('/:id', async (c) => {
     const balance = await getBotBalance(botId);
     
     // Calculate total holdings value
-    const holdingsValue = positions.reduce((sum, p) => sum + (p.amount * p.currentPrice), 0);
+    const holdingsValue = positions.reduce((sum: any, p: any) => sum + (p.amount * p.currentPrice), 0);
     
     return c.json({
       botId,
       name: config?.name || botId,
-      imgURL: config?.imgURL || '',
+      emoji: config?.emoji || '🤖',
       personality: config?.personality || '',
-      style: config?.style || '',
       balance,
       holdingsValue,
       stats: stats ? {
@@ -123,7 +122,7 @@ botsRouter.get('/:id', async (c) => {
         currentStreak: stats.currentStreak,
         bestStreak: stats.bestStreak,
       } : null,
-      positions: positions.map(p => ({
+      positions: positions.map((p: any) => ({
         tokenAddress: p.tokenAddress,
         tokenSymbol: p.tokenSymbol,
         amount: p.amount,

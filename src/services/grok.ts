@@ -38,7 +38,7 @@ export async function generateBotResponse(
   botId: BotId,
   context: ChatContext
 ): Promise<string> {
-  const config = getBotConfig(botId);
+  const config = getBotConfig(botId) as any;
 
   const systemPrompt = `You are ${config.name} in a degen crypto group chat.
 Style: ${config.style || 'casual'}

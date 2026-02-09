@@ -31,7 +31,7 @@ export async function getRecentMessages(limit: number = 20): Promise<Message[]> 
     take: limit,
   });
 
-  return messages.map((m) => ({
+  return messages.map((m: any) => ({
     id: m.id,
     botId: m.botId as BotId | `human_${string}`,
     content: m.content,
@@ -49,7 +49,7 @@ export async function getMessagesByToken(tokenAddress: string, limit: number = 5
     take: limit,
   });
 
-  return messages.map((m) => ({
+  return messages.map((m: any) => ({
     id: m.id,
     botId: m.botId as BotId | `human_${string}`,
     content: m.content,
@@ -97,7 +97,7 @@ export async function getTradesByBot(botId: string, limit: number = 20): Promise
     take: limit,
   });
 
-  return trades.map((t) => ({
+  return trades.map((t: any) => ({
     id: t.id,
     botId: t.botId as BotId | `human_${string}`,
     tokenAddress: t.tokenAddress,
@@ -124,7 +124,7 @@ export async function getOpenPositions(botId: string): Promise<Trade[]> {
     orderBy: { createdAt: 'desc' },
   });
 
-  return trades.map((t) => ({
+  return trades.map((t: any) => ({
     id: t.id,
     botId: t.botId as BotId | `human_${string}`,
     tokenAddress: t.tokenAddress,
@@ -167,7 +167,7 @@ export async function getAllBotStats(): Promise<BotStats[]> {
     orderBy: { winRate: 'desc' },
   });
 
-  return stats.map((s) => ({
+  return stats.map((s: any) => ({
     botId: s.botId as BotId,
     totalTrades: s.totalTrades,
     wins: s.wins,
@@ -219,7 +219,7 @@ export async function saveToken(token: Token, analysis?: TokenAnalysis): Promise
       holders: token.holders,
       verdict: analysis?.verdict,
       riskScore: analysis?.riskScore,
-      analysis: analysis as unknown as Prisma.JsonObject,
+      analysis: analysis as unknown as any,
     },
     create: {
       address: token.address,
@@ -232,7 +232,7 @@ export async function saveToken(token: Token, analysis?: TokenAnalysis): Promise
       deployer: token.deployer,
       verdict: analysis?.verdict,
       riskScore: analysis?.riskScore,
-      analysis: analysis as unknown as Prisma.JsonObject,
+      analysis: analysis as unknown as any,
       createdAt: token.createdAt,
     },
   });
@@ -266,7 +266,7 @@ export async function getAnalyzedTokens(limit: number = 10): Promise<Token[]> {
     take: limit,
   });
 
-  return tokens.map((t) => ({
+  return tokens.map((t: any) => ({
     address: t.address,
     symbol: t.symbol,
     name: t.name,

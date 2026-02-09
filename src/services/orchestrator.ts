@@ -205,7 +205,7 @@ export async function queueTokenForAnalysis(tokenAddress: string, requestedBy?: 
         botId: 'system' as BotId,
         content: `INTERRUPT: Council holder wants to analyze $${token.symbol}!`,
         token: tokenAddress,
-        messageType: 'system' as MessageType & 'system',
+        messageType: 'system' as any,
         createdAt: new Date() as Date,
       });
 
@@ -221,7 +221,7 @@ export async function queueTokenForAnalysis(tokenAddress: string, requestedBy?: 
       botId: 'system' as BotId,
       content: `Council holder requested analysis of $${token.symbol}`,
       token: tokenAddress,
-      messageType: 'system' as MessageType & 'system',
+      messageType: 'system' as any,
       createdAt: new Date(),
     });
 
@@ -1073,10 +1073,10 @@ export async function handleUserTrade(data: {
   // System message announcing the trade
   const tradeMsg: Message = {
     id: randomUUID(),
-    botId: 'system',
+    botId: 'system' as any,
     content: `💰 ${shortAddr} bought ${amountTokens.toLocaleString()} $${tokenSymbol} for ${amountMon} MON`,
     token: data.tokenAddress,
-    messageType: 'user_trade',
+    messageType: 'trade' as any,
     createdAt: new Date(),
   };
   await saveMessage(tradeMsg);

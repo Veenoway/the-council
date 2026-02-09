@@ -6,7 +6,7 @@ import { prisma, getOpenPositions, closePosition } from '../db/index.js';
 import { getTokenPrice } from './nadfun.js';
 import { executeBotTrade, getBotBalance } from './trading.js';
 import { broadcastMessage } from './websocket.js';
-import { getBotConfig, ALL_BOT_IDS, type BotId } from '../bots/personalities.js';
+import { getBotConfig, ALL_BOT_IDS,  } from '../bots/personalities.js';
 import { randomUUID } from 'crypto';
 
 // ============================================================
@@ -61,13 +61,13 @@ export function stopMonitor(): void {
 // POSITION MONITORING
 // ============================================================
 
-async function monitorBotPositions(botId: BotId): Promise<void> {
-  const positions = await getOpenPositions(botId);
+async function monitorBotPositions(botId: any): Promise<void> {
+  const positions = await getOpenPositions(botId) as any;
   
   for (const pos of positions) {
     try {
       // Get current price
-      const priceData = await getTokenPrice(pos.tokenAddress);
+      const priceData = await getTokenPrice(pos.tokenAddress) as any;
       if (!priceData?.price) continue;
       
       const currentPrice = priceData.price;
@@ -110,7 +110,7 @@ async function monitorBotPositions(botId: BotId): Promise<void> {
 // ============================================================
 
 async function closePositionWithTrade(
-  botId: BotId, 
+  botId: any, 
   position: any, 
   currentPrice: number,
   reason: string
@@ -132,7 +132,7 @@ async function closePositionWithTrade(
   
   if (trade?.status === 'confirmed') {
     // Close position in DB
-    await closePosition(position.id, currentPrice, pnlMon, trade.txHash);
+    await closePosition(position.id, currentPrice as any, pnlMon, trade.txHash as any);
     
     // Update bot stats
     await updateBotStats(botId, pnlMon > 0, pnlMon, Number(position.entryValueMon || 0));
@@ -157,7 +157,7 @@ async function closePositionWithTrade(
 // ============================================================
 
 export async function updateBotStats(
-  botId: BotId, 
+  botId: any, 
   isWin: boolean, 
   pnl: number,
   volume: number
@@ -245,7 +245,7 @@ export async function updateBotStats(
 }
 
 // Call this when a trade is opened (to track volume even without PnL yet)
-export async function recordTradeOpen(botId: BotId, volumeMon: number): Promise<void> {
+export async function recordTradeOpen(botId: any, volumeMon: number): Promise<void> {
   const today = new Date().toISOString().split('T')[0];
   
   try {
@@ -298,7 +298,7 @@ export async function getTodayStats(): Promise<any[]> {
     where: { date: today },
   });
   
-  return stats.map(s => ({
+  return stats.map((s: any) => ({
     botId: s.botId,
     trades: s.trades,
     wins: s.wins,
@@ -312,7 +312,7 @@ export async function getTodayStats(): Promise<any[]> {
 // CAN BOT TRADE — Check if bot can open new positions
 // ============================================================
 
-export async function canBotTrade(botId: BotId): Promise<{ allowed: boolean; reason?: string }> {
+export async function canBotTrade(botId: any): Promise<{ allowed: boolean; reason?: string }> {
   const positions = await getOpenPositions(botId);
   
   if (positions.length >= MAX_OPEN_POSITIONS) {
