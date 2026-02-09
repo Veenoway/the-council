@@ -459,6 +459,83 @@ app.get('/api/stats', async (c) => {
 });
 
 // ============================================================
+// TOKEN ANALYSIS REQUEST — For Council holders
+// ============================================================
+
+// Council token address (replace with actual)
+const COUNCIL_TOKEN_ADDRESS = process.env.COUNCIL_TOKEN_ADDRESS || '0x0000000000000000000000000000000000000000';
+
+app.post('/api/analyze/request', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { tokenAddress, requestedBy, symbol, name } = body;
+
+    if (!tokenAddress) {
+      return c.json({ error: 'Token address required' }, 400);
+    }
+
+    // Validate token address format
+    if (!tokenAddress.match(/^0x[a-fA-F0-9]{40}$/)) {
+      return c.json({ error: 'Invalid token address format' }, 400);
+    }
+
+    // TODO: Verify user holds Council token
+    // For now, we'll trust the frontend validation
+    // In production, check on-chain balance
+
+    // Import the function to queue token for analysis
+    const { queueTokenForAnalysis, getIsAnalyzing } = await import('./services/orchestrator.js');
+
+    // Queue the token with symbol/name from frontend
+    const success = await queueTokenForAnalysis(tokenAddress, requestedBy, { symbol, name });
+
+    if (!success) {
+      return c.json({ error: 'Failed to queue token for analysis' }, 500);
+    }
+
+    // Log the request
+    const wasAnalyzing = getIsAnalyzing();
+    console.log(`👑 Analysis requested by ${requestedBy} for $${symbol || tokenAddress}${wasAnalyzing ? ' (INTERRUPTING)' : ''}`);
+
+    return c.json({ 
+      success: true, 
+      message: wasAnalyzing ? 'Interrupting current analysis...' : 'Token queued for analysis',
+      interrupted: wasAnalyzing,
+      tokenAddress,
+      symbol,
+      requestedBy,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error processing analysis request:', error);
+    return c.json({ error: 'Failed to process request' }, 500);
+  }
+});
+
+// Check if user holds Council token
+app.get('/api/holder/check/:address', async (c) => {
+  try {
+    const address = c.req.param('address');
+    
+    // TODO: Check on-chain if user holds Council token
+    // For now, return true for testing
+    const isHolder = true; // Replace with actual check
+    const balance = 1000; // Replace with actual balance
+
+    return c.json({
+      address,
+      isHolder,
+      balance,
+      councilToken: COUNCIL_TOKEN_ADDRESS,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error checking holder status:', error);
+    return c.json({ error: 'Failed to check holder status' }, 500);
+  }
+});
+
+// ============================================================
 // MAIN
 // ============================================================
 
