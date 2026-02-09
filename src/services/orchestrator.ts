@@ -99,10 +99,15 @@ let currentToken: Token | null = null;
 let isAnalyzing = false;
 let lastTokenScan = 0;
 let lastIdleChat = 0;
-const TOKEN_SCAN_INTERVAL = 120_000;
-const IDLE_CHAT_INTERVAL = 180_000; // 3 minutes without tokens = idle chat
+let tokensAnalyzedCount = 0;
+const TOKEN_SCAN_INTERVAL = 60_000;  // 1 minute - less frequent since we batch
+const IDLE_CHAT_INTERVAL = 180_000;
 const seenTokens = new Set<string>();
 const sentMessages = new Set<string>();
+
+// Token queue - fetch once, analyze many
+const tokenQueue: Token[] = [];
+const MAX_QUEUE_SIZE = 20;
 
 // ============================================================
 // MAIN LOOP
@@ -118,45 +123,75 @@ export async function startOrchestrator(): Promise<void> {
 
   while (true) {
     try {
-      if (!isAnalyzing && Date.now() - lastTokenScan > TOKEN_SCAN_INTERVAL) {
-        lastTokenScan = Date.now();
-        const foundToken = await scanForNewTokens();
+      if (!isAnalyzing) {
+        // If queue is empty, refill it
+        if (tokenQueue.length === 0 && Date.now() - lastTokenScan > TOKEN_SCAN_INTERVAL) {
+          lastTokenScan = Date.now();
+          await refillTokenQueue();
+        }
         
-        // If no new token found, maybe do idle chat
-        if (!foundToken && Date.now() - lastIdleChat > IDLE_CHAT_INTERVAL) {
+        // If we have tokens in queue, analyze next one
+        if (tokenQueue.length > 0) {
+          const nextToken = tokenQueue.shift()!;
+          console.log(`📋 Queue: ${tokenQueue.length} tokens remaining`);
+          await analyzeToken(nextToken);
+        } 
+        // No tokens? Maybe idle chat
+        else if (Date.now() - lastIdleChat > IDLE_CHAT_INTERVAL) {
           lastIdleChat = Date.now();
           await idleConversation();
         }
       }
-      await sleep(5000);
+      await sleep(3000);  // Check every 3 seconds
     } catch (error) {
       console.error('Orchestrator error:', error);
-      await sleep(10000);
+      await sleep(4000);
     }
   }
 }
 
-async function scanForNewTokens(): Promise<boolean> {
+// ============================================================
+// TOKEN QUEUE MANAGEMENT
+// ============================================================
+
+async function refillTokenQueue(): Promise<void> {
   try {
-    const tokens = await getNewTokens();
+    console.log(`🔍 Fetching new tokens to fill queue...`);
+    const tokens = await getNewTokens(30);  // Fetch more to filter
+    
+    let added = 0;
     for (const token of tokens) {
+      if (tokenQueue.length >= MAX_QUEUE_SIZE) break;
       if (seenTokens.has(token.address)) continue;
-      seenTokens.add(token.address);
+      
+      // Basic filters
       if (token.mcap < 3000 || token.mcap > 10_000_000) continue;
       if (token.liquidity < 300) continue;
-
+      
+      // Quick liquidity check
       const quickCheck = quickLiquidityCheck(token, 1);
       if (!quickCheck.ok) {
-        console.log(`⏭️ Skipping ${token.symbol}: ${quickCheck.reason}`);
+        console.log(`   ⏭️ ${token.symbol}: ${quickCheck.reason}`);
         continue;
       }
-      await analyzeToken(token);
-      return true; // Found and analyzing a token
+      
+      seenTokens.add(token.address);
+      tokenQueue.push(token);
+      added++;
     }
-    return false; // No new token found
+    
+    console.log(`   ✅ Added ${added} tokens to queue (total: ${tokenQueue.length})`);
+    
+    if (tokenQueue.length > 0) {
+      console.log(`   📋 Queue: ${tokenQueue.map(t => t.symbol).join(', ')}`);
+      
+      // Announce the queue if this is a fresh batch
+      if (added > 0 && tokensAnalyzedCount === 0) {
+        await systemMsg(`📋 Found ${tokenQueue.length} tokens to analyze`);
+      }
+    }
   } catch (error) {
-    console.error('Scan error:', error);
-    return false;
+    console.error('Error refilling queue:', error);
   }
 }
 
@@ -212,7 +247,7 @@ Share this with the group. React based on your personality. Keep it natural.`,
         );
         await sayIdle(spotter as BotId, spotterMsg);
         chat.push(`${BOTS[spotter as BotId].name}: ${spotterMsg}`);
-        await sleep(4000);
+        await sleep(3000);
         
         // Another bot responds
         const responder1 = (['quantum', 'sterling', 'oracle'] as BotId[])[Math.floor(Math.random() * 3)];
@@ -223,7 +258,7 @@ Share this with the group. React based on your personality. Keep it natural.`,
         );
         await sayIdle(responder1, response1);
         chat.push(`${BOTS[responder1].name}: ${response1}`);
-        await sleep(3500);
+        await sleep(1500);
         
         // Third person
         const others = ALL_BOT_IDS.filter(b => b !== spotter && b !== responder1);
@@ -233,7 +268,7 @@ Share this with the group. React based on your personality. Keep it natural.`,
           chat
         );
         await sayIdle(responder2, response2);
-        await sleep(3000);
+        await sleep(1500);
         
         return;
       }
@@ -265,7 +300,7 @@ Keep it natural, like you're chatting while waiting for the next token.`,
     );
     await sayIdle(starter, starterMsg);
     chat.push(`${BOTS[starter].name}: ${starterMsg}`);
-    await sleep(4000);
+    await sleep(2600);
     
     // Someone responds
     const responders = ALL_BOT_IDS.filter(b => b !== starter);
@@ -278,7 +313,7 @@ Keep it natural, like you're chatting while waiting for the next token.`,
     );
     await sayIdle(responder1, response1);
     chat.push(`${BOTS[responder1].name}: ${response1}`);
-    await sleep(3500);
+      await sleep(2000);
     
     // Maybe a third person
     if (Math.random() > 0.4) {
@@ -472,27 +507,67 @@ async function analyzeToken(token: Token): Promise<void> {
   setCurrentTokenInBus(token);
   sentMessages.clear();
   const chat: string[] = [];
+  
+  const isFirstToken = tokensAnalyzedCount === 0;
+  tokensAnalyzedCount++;
 
   try {
     broadcastNewToken(token);
-    await systemMsg(`🔍 Analyzing $${token.symbol}...`);
     
-    // ========== SEQUENTIAL ANALYSIS — Avoid rate limiting ==========
+    const mcapStr = token.mcap >= 1_000_000 ? `${(token.mcap / 1_000_000).toFixed(1)}M` : `${(token.mcap / 1000).toFixed(0)}K`;
+    
+    // Quick intro - different for first token vs subsequent
+    if (isFirstToken) {
+      await systemMsg(`🔍 New token spotted: $${token.symbol}`);
+      await say('chad', `yo new one just dropped, $${token.symbol} at ${mcapStr} mcap 👀`);
+    } else {
+      // Subsequent tokens - quick transition
+      const transitionPhrases = [
+        `next up, $${token.symbol} at ${mcapStr}`,
+        `got another one - $${token.symbol}, ${mcapStr} mcap`,
+        `$${token.symbol} just popped up, ${mcapStr}`,
+        `oo $${token.symbol} looking interesting, ${mcapStr}`,
+      ];
+      await say('chad', transitionPhrases[Math.floor(Math.random() * transitionPhrases.length)]);
+    }
+    await sleep(800);
+    
+    // ========== SEQUENTIAL ANALYSIS — Shorter for subsequent tokens ==========
     console.log(`📊 Fetching data for $${token.symbol}...`);
     
-    // Step 1: Technical Analysis (uses nadapp API)
+    // Step 1: Technical Analysis
     console.log(`   1/3 Technical analysis...`);
     const ta = await analyzeTechnicals(token.address);
     
-    // Step 2: Risk Score (uses nadapp API with cache)
+    // Quick TA comment (only if interesting)
+    if (ta && (ta.rsi < 35 || ta.rsi > 65 || ta.volumeSpike)) {
+      const taComment = ta.rsi < 35 ? `RSI ${ta.rsi.toFixed(0)}, oversold` :
+                        ta.rsi > 65 ? `RSI ${ta.rsi.toFixed(0)}, heated` :
+                        `${ta.volumeRatio?.toFixed(1)}x volume spike`;
+      await say('quantum', taComment);
+        await sleep(600);
+    }
+    
+    // Step 2: Risk Score
     console.log(`   2/3 Risk assessment...`);
     const riskResult = await calculateRiskScore(token);
     
-    // Step 3: Social Context (uses nad.fun API + Grok)
+    // Step 3: Social Context
     console.log(`   3/3 Social analysis...`);
     const socialContext = await getFullSocialContext(token);
     
+    // Quick social comment (only if noteworthy)
     const narrative = socialContext.narrative;
+    if (narrative && (narrative.officialTwitterActive || narrative.isLikelyScam || !narrative.officialTwitter)) {
+      const socialComment = narrative.isLikelyScam ? `🚨 scam vibes on this one` :
+                           !narrative.officialTwitter ? `no twitter 🤔` :
+                           narrative.officialTwitterActive ? `twitter active ✅` : '';
+      if (socialComment) {
+        await say('sensei', socialComment);
+        await sleep(600);
+      }
+    }
+    
     const exitAnalysis = analyzeExitLiquidity(token, 1);
     const scores = calculateScores(token, ta, narrative, exitAnalysis);
     
@@ -505,10 +580,18 @@ async function analyzeToken(token: Token): Promise<void> {
       opinions[botId] = result.opinion;
       details[botId] = { confidence: result.confidence, positionMultiplier: result.positionMultiplier };
     }
+    
+    if (isFirstToken) {
+      await systemMsg(`📊 Analysis complete, let's discuss...`);
+      await sleep(800);
+    }
 
     const sym = token.symbol;
     const price = token.price >= 1 ? `$${token.price.toFixed(2)}` : `$${token.price.toFixed(6)}`;
     const mcap = token.mcap >= 1_000_000 ? `${(token.mcap / 1_000_000).toFixed(1)}M` : `${(token.mcap / 1000).toFixed(0)}K`;
+    
+    // Dynamic sleep - faster for subsequent tokens
+    const pause = (ms: number) => sleep(isFirstToken ? ms : Math.floor(ms * 0.6));
 
     // ========== PHASE 1: JAMES SPOTS IT ==========
     const jamesContext = `New token spotted: $${sym}
@@ -535,7 +618,7 @@ IMPORTANT: Explain WHY you feel this way. Cite specific numbers like "RSI at ${t
     const msg1 = await botSpeak('chad', jamesContext, chat);
     await say('chad', msg1);
     chat.push(`James: ${msg1}`);
-    await sleep(3500);
+    await pause(3000);
 
     // ========== PHASE 2: KEONE WITH TA + TWITTER CORRELATION ==========
     const keoneContext = `$${sym} technical breakdown.
@@ -561,13 +644,13 @@ IMPORTANT: Give specific TA analysis. Say things like "RSI at ${ta?.rsi?.toFixed
     const msg2 = await botSpeak('quantum', keoneContext, chat, { name: 'James', message: msg1 });
     await say('quantum', msg2);
     chat.push(`Keone: ${msg2}`);
-    await sleep(3500);
+    await pause(3000);
 
     // ========== PHASE 3: JAMES RESPONDS TO KEONE ==========
     const msg3 = await botSpeak('chad', `$${sym} discussion. You're ${opinions.chad}.`, chat, { name: 'Keone', message: msg2 });
     await say('chad', msg3);
     chat.push(`James: ${msg3}`);
-    await sleep(3000);
+    await pause(2500);
 
     // ========== PHASE 4: PORTDEV ON COMMUNITY ==========
     const portdevContext = `$${sym} community analysis.
@@ -592,14 +675,14 @@ IMPORTANT: Explain the community situation. Say "${token.holders} holders is X f
     const msg4 = await botSpeak('sensei', portdevContext, chat);
     await say('sensei', msg4);
     chat.push(`Portdev: ${msg4}`);
-    await sleep(3500);
+    await pause(3000);
 
     // ========== PHASE 5: SOMEONE RESPONDS TO PORTDEV ==========
     const responder = Math.random() > 0.5 ? 'chad' : 'quantum';
     const msg5 = await botSpeak(responder, `$${sym}. You're ${opinions[responder]}.`, chat, { name: 'Portdev', message: msg4 });
     await say(responder, msg5);
     chat.push(`${BOTS[responder].name}: ${msg5}`);
-    await sleep(3000);
+    await pause(2500);
 
     // ========== PHASE 6: HARPAL RISK CHECK ==========
     const harpalContext = `$${sym} risk assessment.
@@ -626,7 +709,7 @@ IMPORTANT: Explain the risks with numbers. Say "only $${token.liquidity.toLocale
     const msg6 = await botSpeak('sterling', harpalContext, chat);
     await say('sterling', msg6);
     chat.push(`Harpal: ${msg6}`);
-    await sleep(3500);
+    await pause(3000);
 
     // ========== PHASE 7: DEBATE IF SPLIT ==========
     const bulls = ALL_BOT_IDS.filter(b => opinions[b] === 'bullish');
@@ -641,7 +724,7 @@ IMPORTANT: Explain the risks with numbers. Say "only $${token.liquidity.toLocale
         { name: BOTS[bear].name, message: chat[chat.length - 1].split(': ')[1] });
       await say(bull, bullArg);
       chat.push(`${BOTS[bull].name}: ${bullArg}`);
-      await sleep(3000);
+      await pause(2500);
 
       // Bear responds
       const bearResp = await botSpeak(bear, `$${sym} debate. You're ${opinions[bear]}.`, chat,
@@ -653,7 +736,7 @@ IMPORTANT: Explain the risks with numbers. Say "only $${token.liquidity.toLocale
       if (bearResp.toLowerCase().match(/fair|point|true|agree|valid|maybe|fine|ok/)) {
         if (opinions[bear] === 'bearish') opinions[bear] = 'neutral';
       }
-      await sleep(3000);
+      await pause(2500);
 
       // Third person jumps in
       const others = ALL_BOT_IDS.filter(b => b !== bull && b !== bear && b !== 'oracle');
@@ -662,7 +745,7 @@ IMPORTANT: Explain the risks with numbers. Say "only $${token.liquidity.toLocale
         const thirdMsg = await botSpeak(third, `$${sym} debate ongoing. Your take: ${opinions[third]}`, chat);
         await say(third, thirdMsg);
         chat.push(`${BOTS[third].name}: ${thirdMsg}`);
-        await sleep(3000);
+        await pause(2500);
       }
     }
 
@@ -691,17 +774,17 @@ IMPORTANT: Give cryptic but data-backed insight. Reference the ${scores.overall.
     const msg8 = await botSpeak('oracle', mikeContext, chat);
     await say('oracle', msg8);
     chat.push(`Mike: ${msg8}`);
-    await sleep(3000);
+    await pause(2500);
 
     // ========== PHASE 9: QUICK REACTIONS ==========
     const reactor = Math.random() > 0.5 ? 'chad' : 'sensei';
     const reaction = await botSpeak(reactor, `Mike just spoke on $${sym}.`, chat, { name: 'Mike', message: msg8 });
     await say(reactor, reaction);
-    await sleep(2500);
+    await pause(2000);
 
     // ========== PHASE 10: VOTE ==========
     await systemMsg(`🗳️ Council votes on $${sym}`);
-    await sleep(2000);
+    await pause(1800);
 
     for (const botId of ALL_BOT_IDS) {
       const op = opinions[botId];
@@ -709,7 +792,7 @@ IMPORTANT: Give cryptic but data-backed insight. Reference the ${scores.overall.
       const emoji = op === 'bullish' ? '🟢' : op === 'bearish' ? '🔴' : '⚪';
       const voteText = op === 'bullish' ? 'IN' : op === 'bearish' ? 'OUT' : 'PASS';
       await sayVote(botId, `${emoji} ${voteText} (${conf}%)`);
-      await sleep(800);
+      await pause(600);
     }
 
     // ========== VERDICT ==========
@@ -718,7 +801,7 @@ IMPORTANT: Give cryptic but data-backed insight. Reference the ${scores.overall.
     const harpalVeto = opinions.sterling === 'bearish' && exitAnalysis.liquidityRisk === 'extreme';
     const verdict: 'buy' | 'pass' = (finalBulls.length >= 2 && avgConf >= 55 && !harpalVeto) ? 'buy' : 'pass';
 
-    await sleep(1500);
+    await pause(1200);
     if (harpalVeto) await systemMsg(`🚫 VETOED by Harpal - Exit liquidity too risky`);
     await systemMsg(`📊 ${verdict.toUpperCase()} (${finalBulls.length}/5 @ ${avgConf.toFixed(0)}% avg)`);
 
@@ -727,7 +810,7 @@ IMPORTANT: Give cryptic but data-backed insight. Reference the ${scores.overall.
 
     // ========== EXECUTE TRADES ==========
     if (verdict === 'buy') {
-      await sleep(2000);
+      await pause(1800);
       for (const botId of finalBulls) {
         const { allowed, reason } = await canBotTrade(botId);
         if (!allowed) { await say(botId, `wanted in but ${reason}`); continue; }
@@ -740,7 +823,7 @@ IMPORTANT: Give cryptic but data-backed insight. Reference the ${scores.overall.
         if (finalSize < 0.3) continue;
 
         await say(botId, `aping ${finalSize.toFixed(1)} MON 🎯`);
-        await sleep(1200);
+        await pause(1000);
         
         const trade = await executeBotTrade(botId, token, finalSize, 'buy');
         if (trade?.status === 'confirmed') {
@@ -749,7 +832,7 @@ IMPORTANT: Give cryptic but data-backed insight. Reference the ${scores.overall.
         } else {
           await say(botId, `tx failed 😤`);
         }
-        await sleep(1500);
+        await pause(1200);
       }
     }
 
@@ -759,7 +842,9 @@ IMPORTANT: Give cryptic but data-backed insight. Reference the ${scores.overall.
     await systemMsg(`⚠️ Analysis interrupted`);
   } finally {
     isAnalyzing = false;
-    console.log(`✅ Analysis complete for ${token?.symbol || 'unknown'}`);
+    // Reset scan timer so we scan for new tokens immediately
+    lastTokenScan = 0;
+    console.log(`✅ Analysis complete for ${token?.symbol || 'unknown'} - ready for next token`);
   }
 }
 
