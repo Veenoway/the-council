@@ -458,46 +458,9 @@ async function executeAgentTrade(
   amountMON: number,
   side: 'buy' | 'sell'
 ): Promise<{ status: string; txHash: string; amountOut: number } | null> {
-  try {
-    const { createBotWalletClient, buyToken, sellToken } = await import('../../services/nadfun.js');
-    const { formatEther, parseEther } = await import('viem');
-    
-    // Agent needs a private key stored securely
-    // For now, we'll check if agent has a privateKey field
-    const agentWithKey = await prisma.agent.findUnique({ 
-      where: { id: agent.id },
-      select: { walletPrivateKey: true, walletAddress: true }
-    });
-    
-    if (!agentWithKey?.walletPrivateKey) {
-      console.error(`Agent ${agent.name} has no private key configured`);
-      return null;
-    }
-    
-    const walletClient = createBotWalletClient(agentWithKey.walletPrivateKey as `0x${string}`);
-    
-    if (side === 'buy') {
-      const result = await buyToken(
-        walletClient,
-        token.address as `0x${string}`,
-        amountMON.toString()
-      );
-      
-      if (!result) return null;
-      
-      return {
-        status: 'confirmed',
-        txHash: result.txHash,
-        amountOut: parseFloat(formatEther(result.amountOut)),
-      };
-    } else {
-      // For sell, would need token balance
-      return null;
-    }
-  } catch (error) {
-    console.error('Execute agent trade error:', error);
-    return null;
-  }
+  // This function is deprecated - use executeAgentTradeWithPK instead
+  console.error(`Agent ${agent.name} tried to trade but no PK provided. Use executeAgentTradeWithPK.`);
+  return null;
 }
 
 // Ajoute cette fonction dans agent-hub.ts

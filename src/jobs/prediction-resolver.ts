@@ -186,15 +186,7 @@ async function resolvePricePrediction(prediction: Prediction): Promise<number> {
   }
 }
 
-/**
- * Resolve bot ROI prediction (e.g., "Which bot will have highest ROI?")
- * 
- * Tiebreaker rules:
- * 1. Highest ROI wins
- * 2. If tie: highest total profit (realizedPnl + unrealizedPnl)
- * 3. If still tie: highest win rate
- * 4. If still tie: most trades executed
- */
+
 async function resolveBotROIPrediction(prediction: Prediction): Promise<number> {
   try {
     const response = await fetch(`${process.env.API_URL}/api/bots`);
@@ -345,7 +337,7 @@ export async function syncOnchainPredictions() {
 // START FUNCTION (pour import dans index.ts)
 // ============================================================
 
-export function startPredictionsResolver() {
+export async function startPredictionsResolver() {
   console.log('🚀 Predictions Resolver Started');
   console.log(`Contract: ${PREDICTIONS_CONTRACT}`);
   console.log(`RPC: ${RPC_URL}`);
@@ -373,5 +365,5 @@ export function startPredictionsResolver() {
 // Si lancé directement: node predictions-resolver.js
 const isMainModule = import.meta.url === `file://${process.argv[1]}`;
 if (isMainModule) {
-  startPredictionsResolver();
+  await startPredictionsResolver();
 }

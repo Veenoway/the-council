@@ -8,7 +8,6 @@ import { getOpenPositions } from '../db/index.js';
 import { getBotBalance } from '../services/trading.js';
 import { getBotConfig, ALL_BOT_IDS } from '../bots/personalities.js';
 import type { BotId } from '../types/index.js';
-import type { Trade } from '../types/index.js';
 
 export const botsRouter = new Hono();
 
@@ -132,7 +131,7 @@ botsRouter.get('/:id', async (c) => {
         holdTimeHours: p.holdTimeHours,
         createdAt: p.createdAt,
       })),
-      recentTrades: recentTrades.map((t: Trade) => ({
+      recentTrades: recentTrades.map((t: any) => ({
         id: t.id,
         tokenSymbol: t.tokenSymbol,
         side: t.side,
@@ -170,7 +169,7 @@ botsRouter.get('/:id/trades', async (c) => {
     });
     
     return c.json({
-      trades: trades.map((t: Trade) => ({
+      trades: trades.map((t: any) => ({
         id: t.id,
         tokenAddress: t.tokenAddress,
         tokenSymbol: t.tokenSymbol,

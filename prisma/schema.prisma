@@ -196,19 +196,51 @@ model AgentVote {
   @@index([tokenAddress])
 }
 
+// ============================================================
+// PREDICTIONS
+// ============================================================
+
+model Prediction {
+  id            String   @id @default(uuid())
+  onchainId     Int      @unique
+  type          String   // 'PRICE' | 'BOT_ROI' | 'VOLUME' | 'CUSTOM'
+  question      String
+  tokenAddress  String?
+  targetValue   Float?
+  startValue    Float?
+  endTime       DateTime
+  resolved      Boolean  @default(false)
+  cancelled     Boolean  @default(false)
+  winningOption Int?
+  resolvedAt    DateTime?
+  resolveTxHash String?
+  metadata      Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([resolved])
+  @@index([endTime])
+  @@index([tokenAddress])
+}
+
+// ============================================================
+// AGENT TRADES
+// ============================================================
+
 model AgentTrade {
-  id          String   @id @default(uuid())
-  agentId     String
-  agent       Agent    @relation(fields: [agentId], references: [id])
+  id           String   @id @default(uuid())
+  agentId      String
+  agent        Agent    @relation(fields: [agentId], references: [id])
   tokenAddress String
-  tokenSymbol String
-  side        String   // 'buy' or 'sell'
-  amountIn    Float    // MON spent
-  amountOut   Float    // Tokens received
-  txHash      String   @unique
-  confirmedAt DateTime @default(now())
-  createdAt   DateTime @default(now())
-  
+  tokenSymbol  String
+  side         String   // 'buy' | 'sell'
+  amountIn     Float    // MON spent
+  amountOut    Float    // Tokens received
+  txHash       String   @unique
+  confirmedAt  DateTime @default(now())
+  createdAt    DateTime @default(now())
+
   @@index([agentId])
   @@index([tokenAddress])
+  @@index([createdAt])
 }
