@@ -504,15 +504,32 @@ Share your take. Say it in a way you haven't said before.`;
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
       ],
-      max_tokens: 100,
-      temperature: 0.92, // Slightly higher for more variety
+      max_tokens: 150, // était 100, trop court
+      temperature: 0.92,
     });
 
     let text = res.choices[0]?.message?.content || '';
     text = text.replace(/^(yo|hey|oh|so|well|look|okay|guys|team),?\s*/i, '');
     text = text.replace(/^(james|keone|portdev|harpal|mike)(,\s*)+/i, '');
     
-    const result = text.trim().slice(0, 180);
+    // Trim to last complete sentence instead of hard cut
+    let result = text.trim().slice(0, 250);
+    // Find last sentence-ending punctuation
+    const lastSentenceEnd = Math.max(
+      result.lastIndexOf('.'),
+      result.lastIndexOf('!'),
+      result.lastIndexOf('?'),
+      result.lastIndexOf('🔥'),
+      result.lastIndexOf('💀'),
+      result.lastIndexOf('👁️'),
+      result.lastIndexOf('😤'),
+      result.lastIndexOf('🎌'),
+    );
+    // If we found a sentence end and it's not too short, trim there
+    if (lastSentenceEnd > 40) {
+      result = result.slice(0, lastSentenceEnd + 1);
+    }
+    
     console.log(`💬 ${bot.name}: "${result.slice(0, 50)}..."`);
     return result;
   } catch (e) {

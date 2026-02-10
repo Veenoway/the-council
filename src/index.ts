@@ -261,7 +261,9 @@ app.get('/api/tokens/analysis/:address', async (c) => {
 
 app.get('/api/positions', async (c) => {
   try {
-    const MON_PRICE_USD = 0.01795;
+    const res = await fetch("https://api.nadapp.net/trade/market/0x350035555E10d9AfAF1566AaebfCeD5BA6C27777")
+    const dataMon = await res.json();
+    const MON_PRICE_USD = dataMon?.market_info?.native_price || 0.01795;
     
     const positions = await prisma.position.findMany({ 
       where: { isOpen: true }, 
