@@ -1,5 +1,5 @@
 // ============================================================
-// ORCHESTRATOR v13 — Real conversations, Twitter search, debates
+// ORCHESTRATOR v16 — Slower pace, longer vote windows
 // ============================================================
 
 import type { BotId, Token, Message } from '../types/index.js';
@@ -19,13 +19,45 @@ import { getBotMentalState, calculateMentalModifiers, applyPersonalityToModifier
 import { getFullSocialContext, type NarrativeAnalysis } from '../services/bots/narrativeAnalysis.js';
 import { analyzeExitLiquidity, quickLiquidityCheck, type ExitAnalysis } from '../services/bots/exitLiquidity.js';
 
+// Agent Hub for external agents voting
+import { openVoteWindow, closeVoteWindow } from './hub/agent-hub.js';
+
 const grok = new OpenAI({
   apiKey: process.env.XAI_API_KEY || process.env.GROK_API_KEY,
   baseURL: 'https://api.x.ai/v1',
 });
 
 // ============================================================
-// BOT PERSONALITIES — Full detail for conversations
+// TIMING CONFIGURATION — Easy to adjust
+// ============================================================
+
+// ============================================================
+// TIMING CONFIGURATION — Plus de temps pour les discussions
+// ============================================================
+
+const TIMING = {
+  // Message delays (in ms)
+  MESSAGE_DELAY: 3500,           // 3.5s between bot messages
+  MESSAGE_DELAY_FAST: 2500,      // 2.5s for quick reactions
+  MESSAGE_DELAY_SLOW: 4500,      // 4.5s for thoughtful responses
+  
+  // Vote timing
+  VOTE_WINDOW_DURATION: 15000,   // 15s for external agents to vote
+  VOTE_ANNOUNCEMENT_DELAY: 2000, // 2s after announcing vote
+  VOTE_BETWEEN_BOTS: 1500,       // 1.5s between each bot vote
+  
+  // Analysis phases
+  PHASE_TRANSITION: 3000,        // 3s between analysis phases
+  LOADING_CHAT_DELAY: 3000,      // 3s for loading messages
+  
+  // Cooldowns
+  MIN_ANALYSIS_COOLDOWN: 30000,  // 30s minimum between tokens
+  IDLE_CHAT_INTERVAL: 60000,     // 60s before idle chat
+  TOKEN_SCAN_INTERVAL: 5000,     // 5s between token scans
+};
+
+// ============================================================
+// BOT PERSONALITIES
 // ============================================================
 
 const BOTS: Record<BotId, {
@@ -97,36 +129,29 @@ const BOTS: Record<BotId, {
 
 let currentToken: Token | null = null;
 let isAnalyzing = false;
-let currentAnalysisId: string | null = null;  // Unique ID for current analysis
-let shouldInterrupt = false;  // Flag to interrupt current analysis
-let interruptedBy: string | null = null;  // Who interrupted
-let interruptToken: Token | null = null;  // Token that caused interruption
+let currentAnalysisId: string | null = null;
+let shouldInterrupt = false;
+let interruptedBy: string | null = null;
+let interruptToken: Token | null = null;
 let lastTokenScan = 0;
 let lastIdleChat = 0;
 let tokensAnalyzedCount = 0;
-const TOKEN_SCAN_INTERVAL = 0;
-const IDLE_CHAT_INTERVAL = 10_000;
-const MIN_ANALYSIS_DURATION = 4_000;  // Minimum 45 seconds per token
 let lastAnalysisEnd = 0;
 const seenTokens = new Set<string>();
 const sentMessages = new Set<string>();
 
-// Token queue - fetch once, analyze many
 const tokenQueue: Token[] = [];
 const MAX_QUEUE_SIZE = 20;
-
-// Priority queue for holder-requested tokens
 const priorityQueue: { token: Token; requestedBy: string }[] = [];
 
 // ============================================================
-// EXPORTED FUNCTIONS — For API endpoints
+// EXPORTED FUNCTIONS
 // ============================================================
 
 export function getIsAnalyzing(): boolean {
   return isAnalyzing;
 }
 
-// Check if we should interrupt (called during analysis)
 export function checkInterrupt(): boolean {
   return shouldInterrupt;
 }
@@ -144,7 +169,6 @@ export async function queueTokenForAnalysis(tokenAddress: string, requestedBy?: 
 
     console.log(`Fetching token data for ${tokenAddress} (frontend: $${symbol})...`);
 
-    // Try to fetch from nad.fun API first
     try {
       const response = await fetch(`https://api.nad.fun/token/${tokenAddress}`);
       if (response.ok) {
@@ -157,7 +181,6 @@ export async function queueTokenForAnalysis(tokenAddress: string, requestedBy?: 
         price = parseFloat(marketInfo.token_price || marketInfo.price_usd || '0');
         holders = parseInt(marketInfo.holder_count) || 0;
         
-        // Calculate mcap and liquidity
         const totalSupply = parseFloat(marketInfo.total_supply || '0') / 1e18;
         mcap = price * totalSupply;
         
@@ -168,13 +191,10 @@ export async function queueTokenForAnalysis(tokenAddress: string, requestedBy?: 
         deployer = tokenInfo.creator?.account_id || '';
         createdAt = tokenInfo.created_at ? new Date(tokenInfo.created_at * 1000) : new Date();
         
-        console.log(`Fetched $${symbol}: ${holders.toLocaleString()} holders, $${mcap.toLocaleString()} mcap, $${liquidity.toLocaleString()} liq`);
-      } else {
-        console.log(`nad.fun API returned ${response.status}, using frontend data for $${symbol}`);
+        console.log(`Fetched $${symbol}: ${holders.toLocaleString()} holders, $${mcap.toLocaleString()} mcap`);
       }
     } catch (fetchError) {
       console.error('Failed to fetch from nad.fun:', fetchError);
-      console.log(`Using frontend data for $${symbol}`);
     }
 
     const token: Token = {
@@ -190,36 +210,30 @@ export async function queueTokenForAnalysis(tokenAddress: string, requestedBy?: 
       createdAt,
     };
 
-    console.log(`Token $${token.symbol} requested by holder ${requestedBy}`);
-
-    // If currently analyzing, interrupt!
     if (isAnalyzing && currentToken) {
       console.log(`INTERRUPTING analysis of $${currentToken.symbol} for $${token.symbol}`);
       shouldInterrupt = true;
       interruptedBy = requestedBy || 'a Council holder';
       interruptToken = token;
       
-      // Broadcast interruption message
       broadcastMessage({
         id: randomUUID(),
         botId: 'system' as BotId,
-        content: `INTERRUPT: Council holder wants to analyze $${token.symbol}!`,
+        content: `⚡ INTERRUPT: Council holder wants to analyze $${token.symbol}!`,
         token: tokenAddress,
         messageType: 'system' as any,
-        createdAt: new Date() as Date,
+        createdAt: new Date(),
       });
 
       return true;
     }
 
-    // Not analyzing - add to priority queue
     priorityQueue.unshift({ token, requestedBy: requestedBy || 'anonymous' });
     
-    // Broadcast that a holder requested analysis
     broadcastMessage({
       id: randomUUID(),
       botId: 'system' as BotId,
-      content: `Council holder requested analysis of $${token.symbol}`,
+      content: `📋 Council holder requested analysis of $${token.symbol}`,
       token: tokenAddress,
       messageType: 'system' as any,
       createdAt: new Date(),
@@ -232,39 +246,31 @@ export async function queueTokenForAnalysis(tokenAddress: string, requestedBy?: 
   }
 }
 
-// Handle the interruption - bots react and switch to new token
 async function handleInterruption(): Promise<void> {
   if (!interruptToken || !interruptedBy) return;
 
   const token = interruptToken;
   const requester = interruptedBy;
-  const oldToken = currentToken;
 
-  // Reset interrupt flags
   shouldInterrupt = false;
   interruptedBy = null;
   interruptToken = null;
 
-  // Bots react to being interrupted
   const reactions = [
-    { botId: 'chad' as BotId, msg: `Ayo hold up! A holder wants us to check $${token.symbol}? Say less fam, let's see what we got` },
-    { botId: 'quantum' as BotId, msg: `Interrupting analysis... New priority target: $${token.symbol}. Recalibrating metrics.` },
-    { botId: 'sensei' as BotId, msg: `The community speaks! A holder summons us to $${token.symbol}. We answer the call.` },
-    { botId: 'sterling' as BotId, msg: `*sighs* Another urgent request. Very well, redirecting attention to $${token.symbol}.` },
-    { botId: 'oracle' as BotId, msg: `The holders guide us to $${token.symbol}. Let me see what the charts reveal.` },
+    { botId: 'chad' as BotId, msg: `Ayo hold up! A holder wants us to check $${token.symbol}? Say less fam 🔥` },
+    { botId: 'quantum' as BotId, msg: `Interrupting analysis... New priority: $${token.symbol}. Recalibrating.` },
+    { botId: 'sensei' as BotId, msg: `The community speaks! A holder summons us to $${token.symbol}. We answer.` },
   ];
 
-  // Pick 2-3 random bots to react
   const shuffled = reactions.sort(() => Math.random() - 0.5);
-  const reactingBots = shuffled.slice(0, 2 + Math.floor(Math.random() * 2));
+  const reactingBots = shuffled.slice(0, 2);
 
   for (const { botId, msg } of reactingBots) {
     await say(botId, msg);
-    await sleep(800);
+    await sleep(TIMING.MESSAGE_DELAY);
   }
 
-  // Now start analyzing the new token
-  await sleep(500);
+  await sleep(TIMING.PHASE_TRANSITION);
   analyzeToken(token);
 }
 
@@ -273,7 +279,11 @@ async function handleInterruption(): Promise<void> {
 // ============================================================
 
 export async function startOrchestrator(): Promise<void> {
-  console.log('The Council v15 - With Interruption Support');
+  console.log('🏛️ The Council v16 - Slower Pace Edition');
+  console.log(`   Message delay: ${TIMING.MESSAGE_DELAY/1000}s`);
+  console.log(`   Vote window: ${TIMING.VOTE_WINDOW_DURATION/1000}s`);
+  console.log(`   Analysis cooldown: ${TIMING.MIN_ANALYSIS_COOLDOWN/1000}s`);
+  
   await loadMentalStatesFromDB();
 
   onInternalEvent('human_message', async (data) => {
@@ -282,47 +292,40 @@ export async function startOrchestrator(): Promise<void> {
 
   while (true) {
     try {
-      // Check for interruption first
       if (shouldInterrupt && interruptToken) {
         console.log(`Processing interruption for $${interruptToken.symbol}`);
-        isAnalyzing = false; // Force stop current analysis
+        isAnalyzing = false;
         await handleInterruption();
         continue;
       }
 
       if (!isAnalyzing) {
-        // Priority: Check holder-requested tokens first (no cooldown for holders)
         if (priorityQueue.length > 0) {
           const { token, requestedBy } = priorityQueue.shift()!;
           console.log(`Processing priority request from ${requestedBy}: $${token.symbol}`);
           analyzeToken(token);
         }
-        // Check cooldown for automatic tokens
-        else if (Date.now() - lastAnalysisEnd < MIN_ANALYSIS_DURATION) {
-          // Still in cooldown, wait
-          const remaining = Math.round((MIN_ANALYSIS_DURATION - (Date.now() - lastAnalysisEnd)) / 1000);
+        else if (Date.now() - lastAnalysisEnd < TIMING.MIN_ANALYSIS_COOLDOWN) {
+          const remaining = Math.round((TIMING.MIN_ANALYSIS_COOLDOWN - (Date.now() - lastAnalysisEnd)) / 1000);
           if (remaining > 0 && remaining % 10 === 0) {
-            console.log(`Cooldown: ${remaining}s until next auto-analysis`);
+            console.log(`⏳ Cooldown: ${remaining}s until next auto-analysis`);
           }
         }
-        // If queue is empty, refill it
-        else if (tokenQueue.length === 0 && Date.now() - lastTokenScan > TOKEN_SCAN_INTERVAL) {
+        else if (tokenQueue.length === 0 && Date.now() - lastTokenScan > TIMING.TOKEN_SCAN_INTERVAL) {
           lastTokenScan = Date.now();
           await refillTokenQueue();
         }
-        // If we have tokens in queue, analyze next one
         else if (tokenQueue.length > 0) {
           const nextToken = tokenQueue.shift()!;
-            console.log(`Queue: ${tokenQueue.length} tokens remaining`);
+          console.log(`Queue: ${tokenQueue.length} tokens remaining`);
           analyzeToken(nextToken);
         } 
-        // No tokens? Maybe idle chat
-        else if (Date.now() - lastIdleChat > IDLE_CHAT_INTERVAL) {
+        else if (Date.now() - lastIdleChat > TIMING.IDLE_CHAT_INTERVAL) {
           lastIdleChat = Date.now();
           await idleConversation();
         }
       }
-      await sleep(500);  // Check more frequently
+      await sleep(1000);
     } catch (error) {
       console.error('Orchestrator error:', error);
       await sleep(5000);
@@ -336,39 +339,29 @@ export async function startOrchestrator(): Promise<void> {
 
 async function refillTokenQueue(): Promise<void> {
   try {
-    console.log(`Fetching new tokens to fill queue...`);
-    const tokens = await getNewTokens(30);  // Fetch more to filter
+    console.log(`📡 Fetching new tokens...`);
+    const tokens = await getNewTokens(30);
     
     let added = 0;
     for (const token of tokens) {
       if (tokenQueue.length >= MAX_QUEUE_SIZE) break;
       if (seenTokens.has(token.address)) continue;
       
-      // Basic filters
       if (token.mcap < 3000 || token.mcap > 10_000_000) continue;
       if (token.liquidity < 300) continue;
       
-      // Quick liquidity check
       const quickCheck = quickLiquidityCheck(token, 1);
-      if (!quickCheck.ok) {
-        console.log(`  ${token.symbol}: ${quickCheck.reason}`);
-        continue;
-      }
+      if (!quickCheck.ok) continue;
       
       seenTokens.add(token.address);
       tokenQueue.push(token);
       added++;
     }
     
-    console.log(`Added ${added} tokens to queue (total: ${tokenQueue.length})`);
+    console.log(`✅ Added ${added} tokens to queue (total: ${tokenQueue.length})`);
     
-    if (tokenQueue.length > 0) {
-      console.log(`Queue: ${tokenQueue.map(t => t.symbol).join(', ')}`);
-      
-      // Announce the queue if this is a fresh batch
-      if (added > 0 && tokensAnalyzedCount === 0) {
-        await systemMsg(`Found ${tokenQueue.length} tokens to analyze`);
-      }
+    if (tokenQueue.length > 0 && added > 0 && tokensAnalyzedCount === 0) {
+      await systemMsg(`Found ${tokenQueue.length} tokens to analyze`);
     }
   } catch (error) {
     console.error('Error refilling queue:', error);
@@ -376,68 +369,58 @@ async function refillTokenQueue(): Promise<void> {
 }
 
 // ============================================================
-// IDLE CONVERSATION — General Monad/crypto chat when no tokens
+// IDLE CONVERSATION
 // ============================================================
 
 async function idleConversation(): Promise<void> {
   if (isAnalyzing) return;
   
-  console.log('No new tokens, starting idle conversation...');
+  console.log('💤 Starting idle conversation...');
   sentMessages.clear();
   const chat: string[] = [];
-  const IDLE_DELAY = 2000;
   
   try {
-    // General Monad/crypto chat topics
     const idleTopics = [
       { topic: 'Monad speed', context: 'Monad is insanely fast - 10,000 TPS. How does this change memecoin trading?' },
       { topic: 'memecoin meta', context: 'What memecoin narratives are hot right now? AI agents? Animals? Culture coins?' },
-      { topic: 'waiting for plays', context: 'Market is quiet. What setups are you watching? What would make you ape?' },
-      { topic: 'best entries', context: 'What makes a good memecoin entry? Low mcap? Strong community? Good chart?' },
-      { topic: 'risk management', context: 'How do you size positions on memecoins? When do you cut losses?' },
-      { topic: 'Monad ecosystem', context: 'Monad mainnet is live. What projects are you excited about?' },
-      { topic: 'rug pulls', context: 'How do you spot a rug? What are the red flags you look for?' },
-      { topic: 'diamond hands vs taking profit', context: 'When do you hold vs take profit? Discuss your strategy.' },
-      { topic: 'CT alpha', context: 'Where do you find alpha? CT? Telegram? On-chain analysis?' },
-      { topic: 'recent trades', context: 'Talk about a recent trade - win or loss. What did you learn?' },
+      { topic: 'waiting for plays', context: 'Market is quiet. What setups are you watching?' },
+      { topic: 'risk management', context: 'How do you size positions on memecoins?' },
+      { topic: 'rug pulls', context: 'How do you spot a rug? What are the red flags?' },
     ];
     
     const selected = idleTopics[Math.floor(Math.random() * idleTopics.length)];
-    console.log(`Idle topic: ${selected.topic}`);
+    console.log(`   Topic: ${selected.topic}`);
     
-    // Random starter
     const starter = ALL_BOT_IDS[Math.floor(Math.random() * ALL_BOT_IDS.length)];
     
     const starterMsg = await botSpeak(starter,
       `Start a casual conversation about: ${selected.topic}
 Context: ${selected.context}
-Keep it natural, like you're chatting while waiting for the next token to analyze.`,
+Keep it natural, like you're chatting while waiting.`,
       chat
     );
     await sayIdle(starter, starterMsg);
     chat.push(`${BOTS[starter].name}: ${starterMsg}`);
-    await sleep(IDLE_DELAY);
+    await sleep(TIMING.MESSAGE_DELAY_SLOW);
     
-    // Someone responds
     const responders = ALL_BOT_IDS.filter(b => b !== starter);
     const responder1 = responders[Math.floor(Math.random() * responders.length)];
     
     const response1 = await botSpeak(responder1,
-      `${selected.topic} discussion. Give your perspective based on your expertise.`,
+      `${selected.topic} discussion. Give your perspective.`,
       chat,
       { name: BOTS[starter].name, message: starterMsg }
     );
     await sayIdle(responder1, response1);
     chat.push(`${BOTS[responder1].name}: ${response1}`);
-    await sleep(IDLE_DELAY);
+    await sleep(TIMING.MESSAGE_DELAY_SLOW);
     
-    // Maybe a third person (60% chance)
-    if (Math.random() > 0.4) {
+    if (Math.random() > 0.5) {
       const remaining = responders.filter(b => b !== responder1);
       const responder2 = remaining[Math.floor(Math.random() * remaining.length)];
       
       const response2 = await botSpeak(responder2,
-        `Join the conversation about ${selected.topic}. Add your unique perspective.`,
+        `Join the conversation about ${selected.topic}. Add your perspective.`,
         chat
       );
       await sayIdle(responder2, response2);
@@ -448,7 +431,6 @@ Keep it natural, like you're chatting while waiting for the next token to analyz
   }
 }
 
-// Idle messages don't have a token context
 async function sayIdle(botId: BotId, content: string): Promise<void> {
   if (!content || content.length < 2) return;
   const msg: Message = { id: randomUUID(), botId, content, token: undefined, messageType: 'chat', createdAt: new Date() };
@@ -481,28 +463,26 @@ CURRENT MENTAL STATE: ${mentalSummary || 'focused'}
 ${mentalState.lossStreak >= 2 ? `You've had ${mentalState.lossStreak} losses recently - you're more cautious.` : ''}
 ${mentalState.winStreak >= 2 ? `You're on a ${mentalState.winStreak} win streak - confident but not reckless.` : ''}
 
-CRITICAL RULES:
-1. ALWAYS CITE SPECIFIC DATA - say "RSI at 42" not just "oversold", say "2.3x volume spike" not just "volume up"
-2. EXPLAIN YOUR REASONING - "I'm bullish because X, Y, Z" not just "bullish"
-3. USE ACTUAL NUMBERS given to you - prices, percentages, holder counts
-4. Stay in character - use your speaking style and phrases
-5. Keep it 15-30 words - concise but informative
-6. NEVER start with someone's name
-7. Be SKEPTICAL - 95% of memecoins fail
-8. If you disagree, say WHY with data`;
+RULES:
+1. CITE SPECIFIC DATA - "RSI at 42", "2.3x volume spike"
+2. EXPLAIN YOUR REASONING
+3. Stay in character
+4. Keep it 15-35 words
+5. NEVER start with someone's name
+6. Be SKEPTICAL - 95% of memecoins fail`;
 
   const userPrompt = replyTo 
     ? `${replyTo.name} just said: "${replyTo.message}"
 
 ${context}
 
-Respond to ${replyTo.name}. Do you agree? Disagree? Have a follow-up question?`
+Respond to ${replyTo.name}. Do you agree? Disagree?`
     : `${context}
 
 Recent chat:
 ${chatHistory.slice(-4).join('\n')}
 
-Share your take. What's your read?`;
+Share your take.`;
 
   try {
     const res = await grok.chat.completions.create({
@@ -511,17 +491,16 @@ Share your take. What's your read?`;
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
       ],
-      max_tokens: 120,  // Increased for more detailed explanations
-      temperature: 0.9,
+      max_tokens: 100,
+      temperature: 0.85,
     });
 
     let text = res.choices[0]?.message?.content || '';
-    // Clean up
     text = text.replace(/^(yo|hey|oh|so|well|look|okay|guys|team),?\s*/i, '');
     text = text.replace(/^(james|keone|portdev|harpal|mike)(,\s*)+/i, '');
     
-    const result = text.trim().slice(0, 200);
-      console.log(`${bot.name}: "${result.slice(0, 50)}..."`);
+    const result = text.trim().slice(0, 180);
+    console.log(`💬 ${bot.name}: "${result.slice(0, 50)}..."`);
     return result;
   } catch (e) {
     console.error(`Grok error for ${botId}:`, e);
@@ -577,7 +556,6 @@ function calculateBotOpinion(botId: BotId, scores: TokenScores, narrative: Narra
     scores.narrativeScore * bot.weights.narrative +
     scores.exitLiquidityScore * bot.weights.exitLiquidity;
   
-  // Intuition randomness
   weightedScore += (Math.random() * 8 - 4) * (1 - bot.emotionalStability);
   
   const adjustedBullish = bot.bullishThreshold + modifiers.thresholdModifier;
@@ -596,7 +574,6 @@ function calculateBotOpinion(botId: BotId, scores: TokenScores, narrative: Narra
     confidence = 45;
   }
   
-  // Overrides
   if (botId === 'sterling' && exitAnalysis && (!exitAnalysis.canExit || exitAnalysis.liquidityRisk === 'extreme')) {
     opinion = 'bearish'; confidence = 90;
   }
@@ -613,28 +590,24 @@ function calculateBotOpinion(botId: BotId, scores: TokenScores, narrative: Narra
 }
 
 // ============================================================
-// MAIN ANALYSIS — Fast & Fluid conversations
+// MAIN ANALYSIS
 // ============================================================
 
-// Helper to check if we should abort current analysis
 function shouldAbort(analysisId: string): boolean {
-  // Abort if interrupted OR if this analysis is stale (new one started)
   if (shouldInterrupt) {
-    console.log(`Analysis ${analysisId} interrupted by user request!`);
+    console.log(`⚡ Analysis ${analysisId.slice(0, 8)} interrupted!`);
     return true;
   }
   if (currentAnalysisId !== analysisId) {
-    console.log(`Analysis ${analysisId} is stale (current: ${currentAnalysisId})`);
+    console.log(`⏭️ Analysis ${analysisId.slice(0, 8)} is stale`);
     return true;
   }
   return false;
 }
 
 async function analyzeToken(token: Token): Promise<void> {
-  // Generate unique ID for this analysis
   const analysisId = randomUUID();
   
-  // If already analyzing, don't start another (wait for interrupt to be processed)
   if (isAnalyzing) {
     console.log(`Already analyzing, skipping ${token.symbol}`);
     return;
@@ -649,73 +622,61 @@ async function analyzeToken(token: Token): Promise<void> {
   
   const isFirstToken = tokensAnalyzedCount === 0;
   tokensAnalyzedCount++;
-  
-  // SLOWER DELAYS - give users time to read
-  const D = isFirstToken ? 500 : 1000;  // Base delay in ms (was 600-1200)
+
+  console.log(`\n${'='.repeat(50)}`);
+  console.log(`🔍 ANALYZING: $${token.symbol}`);
+  console.log(`${'='.repeat(50)}\n`);
 
   try {
     broadcastNewToken(token);
     const mcapStr = token.mcap >= 1_000_000 ? `${(token.mcap / 1_000_000).toFixed(1)}M` : `${(token.mcap / 1000).toFixed(0)}K`;
     
-    // Quick intro
+    // ========== INTRO ==========
     if (isFirstToken) {
-      await systemMsg(`Scanning $${token.symbol}...`);
+      await systemMsg(`🔍 Scanning $${token.symbol}...`);
+      await sleep(TIMING.MESSAGE_DELAY_FAST);
     }
-    await say('chad', `$${token.symbol} at ${mcapStr} 👀`, analysisId);
     
-    // CHECK INTERRUPT after intro
+    await say('chad', `$${token.symbol} at ${mcapStr} 👀 let me pull up the data`, analysisId);
+    await sleep(TIMING.MESSAGE_DELAY);
+    
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
+
+    // ========== LOADING PHASE ==========
+    console.log(`📊 Fetching data for $${token.symbol}...`);
     
-    // ========== PARALLEL ANALYSIS - fetch all data at once ==========
-    console.log(`Analyzing $${token.symbol}...`);
-    
-    // ========== LOADING CHAT — Bots chat while data is fetched ==========
-    // Start fetching data in background
     const dataPromise = Promise.all([
       analyzeTechnicals(token.address),
       calculateRiskScore(token),
       getFullSocialContext(token),
     ]);
 
-    // Meanwhile, bots have a quick chat about the token or Monad
-    const loadingChats = [
-      { botId: 'chad' as BotId, msg: `pulling up the charts for $${token.symbol}...` },
-      { botId: 'quantum' as BotId, msg: `running technical analysis on $${token.symbol}...` },
-      { botId: 'sensei' as BotId, msg: `checking the community vibes for $${token.symbol}...` },
-        { botId: 'chad' as BotId, msg: `let's see what CT is saying about this one` },
-      { botId: 'oracle' as BotId, msg: `scanning the whale wallets...` },
-      { botId: 'sterling' as BotId, msg: `calculating exit liquidity metrics...` },
-      { botId: 'sensei' as BotId, msg: `nad.fun been cooking lately ngl` },
-      { botId: 'chad' as BotId, msg: `monad szn coming fr fr` },
-      { botId: 'quantum' as BotId, msg: `volume on nad.fun looking healthy today` },
+    // Loading chat - 2 bots chat while waiting
+    const loadingMessages = [
+      { botId: 'quantum' as BotId, msg: `running TA on $${token.symbol}...` },
+      { botId: 'sensei' as BotId, msg: `checking community vibes...` },
+      { botId: 'oracle' as BotId, msg: `scanning whale wallets...` },
+      { botId: 'sterling' as BotId, msg: `calculating exit liquidity...` },
     ];
-
-    // Pick 1-2 random loading messages
-    const shuffled = loadingChats.sort(() => Math.random() - 0.5);
-    const loadingMsg = shuffled[0];
     
-    await say(loadingMsg.botId, loadingMsg.msg, analysisId);
+    const shuffledLoading = loadingMessages.sort(() => Math.random() - 0.5);
+    await say(shuffledLoading[0].botId, shuffledLoading[0].msg, analysisId);
+    await sleep(TIMING.LOADING_CHAT_DELAY);
     
-    // Maybe a second bot responds while waiting
-    if (Math.random() > 0.5) {
-      await sleep(800);
-      const secondMsg = shuffled.find(m => m.botId !== loadingMsg.botId);
-      if (secondMsg) {
-        await say(secondMsg.botId, secondMsg.msg, analysisId);
-      }
+    if (Math.random() > 0.4) {
+      await say(shuffledLoading[1].botId, shuffledLoading[1].msg, analysisId);
+      await sleep(TIMING.MESSAGE_DELAY_FAST);
     }
-
-    // Wait for data to be ready
+    
     const [ta, riskResult, socialContext] = await dataPromise;
     
-    // CHECK INTERRUPT after data fetch
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     
     const narrative = socialContext.narrative;
     const exitAnalysis = analyzeExitLiquidity(token, 1);
     const scores = calculateScores(token, ta, narrative, exitAnalysis);
     
-    // Calculate all opinions upfront
+    // Calculate all opinions
     const opinions: Record<BotId, 'bullish' | 'bearish' | 'neutral'> = {} as any;
     const details: Record<BotId, { confidence: number; positionMultiplier: number }> = {} as any;
     for (const botId of ALL_BOT_IDS) {
@@ -726,232 +687,350 @@ async function analyzeToken(token: Token): Promise<void> {
 
     const sym = token.symbol;
     const price = token.price >= 1 ? `$${token.price.toFixed(2)}` : `$${token.price.toFixed(6)}`;
-    const mcap = mcapStr;
 
-    // ========== PHASE 1: JAMES SPOTS IT (momentum/vibe) ==========
-    const jamesContext = `New token spotted: $${sym}
-Price: ${price}, Mcap: ${mcap}, Holders: ${token.holders.toLocaleString()}
+    // ========== PHASE 1: JAMES MOMENTUM CHECK ==========
+    console.log(`\n📈 Phase 1: Momentum Check`);
+    
+    const jamesContext = `New token: $${sym}
+Price: ${price}, Mcap: ${mcapStr}, Holders: ${token.holders.toLocaleString()}
 
-VIBE CHECK:
+VIBE:
 - Volume: ${ta?.volumeSpike ? `PUMPING ${ta.volumeRatio?.toFixed(1)}x` : 'quiet'}
-${ta?.whaleActivity === 'buying' ? '- Whales are loading' : ta?.whaleActivity === 'selling' ? '- Whales dumping' : ''}
-- Trend: ${ta?.trend?.replace(/_/g, ' ') || 'unclear'}
-
-TWITTER:
-  ${narrative?.officialTwitter ? `- Has Twitter: ${narrative.officialTwitterActive ? 'ACTIVE' : 'dead account'}` : '- No Twitter'}
-${narrative?.mentionCount ? `- CT mentions: ${narrative.mentionCount}` : ''}
-${narrative?.sentimentOnX ? `- Sentiment: ${narrative.sentimentOnX}` : ''}
+${ta?.whaleActivity === 'buying' ? '- Whales loading' : ta?.whaleActivity === 'selling' ? '- Whales dumping' : ''}
+- Twitter: ${narrative?.officialTwitterActive ? 'ACTIVE' : 'quiet'}
 ${narrative?.redFlags?.length ? `- RED FLAGS: ${narrative.redFlags.join(', ')}` : ''}
 
 Your vibe: ${opinions.chad} (${details.chad.confidence}%)
 
-Talk about the MOMENTUM and SOCIAL vibes. Don't mention RSI or technical indicators - that's Keone's job. Focus on: mcap, holders, volume, twitter activity.`;
+Focus on momentum and social vibes. Short take.`;
 
     const msg1 = await botSpeak('chad', jamesContext, chat);
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     await say('chad', msg1, analysisId);
     chat.push(`James: ${msg1}`);
-    await sleep(D);
+    await sleep(TIMING.MESSAGE_DELAY);
 
-    // ========== PHASE 2: KEONE TECHNICAL ANALYSIS ==========
+    // ========== PHASE 2: KEONE TA ==========
+    console.log(`\n📊 Phase 2: Technical Analysis`);
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     
-    const keoneContext = `$${sym} - your turn for TA.
+    // Build pattern info for Keone
+    const patternInfo = ta?.patterns && ta.patterns.length > 0
+      ? `PATTERNS:\n${ta.patterns.slice(0, 3).map(p => `- ${p.name}: ${p.description} (${p.confidence}%)`).join('\n')}`
+      : '';
+    
+    const channelInfo = ta?.channel && ta.channel.type !== 'none'
+      ? `CHANNEL: ${ta.channel.type}${ta.channel.breakout !== 'none' ? ` breakout ${ta.channel.breakout}` : ''}`
+      : '';
+    
+    const keoneContext = `$${sym} Technical Analysis.
 
-TECHNICALS:
-- RSI: ${ta?.rsi?.toFixed(0) || '?'} ${ta?.rsiSignal === 'overbought' ? '(overbought)' : ta?.rsiSignal === 'oversold' ? '(oversold)' : ''}
+INDICATORS:
+- RSI: ${ta?.rsi?.toFixed(0) || '?'} ${ta?.rsiSignal === 'overbought' ? '⚠️ OVERBOUGHT' : ta?.rsiSignal === 'oversold' ? '✅ OVERSOLD' : ''}
 - Trend: ${ta?.trend?.replace(/_/g, ' ') || 'unclear'}
-- MAs: ${ta?.maSignal || 'N/A'} ${ta?.maCrossover === 'golden_cross' ? '(golden cross)' : ta?.maCrossover === 'death_cross' ? '(death cross)' : ''}
-- Volume: ${ta?.volumeSpike ? `${ta.volumeRatio?.toFixed(1)}x spike` : 'normal'}
+- MAs: ${ta?.priceVsMa === 'above_all' ? 'Price ABOVE all MAs' : ta?.priceVsMa === 'below_all' ? 'Price BELOW all MAs' : 'mixed'}
+${ta?.maCrossover !== 'none' ? `- ${ta?.maCrossover === 'golden_cross' ? '🟢 GOLDEN CROSS' : '🔴 DEATH CROSS'}` : ''}
+- Volume: ${ta?.volumeSpike ? `${ta.volumeRatio?.toFixed(1)}x SPIKE` : 'normal'} (${ta?.volumeTrend || 'stable'})
 - OBV: ${ta?.obvTrend || 'neutral'}
-${ta?.bullishFactors?.length ? `- Bullish: ${ta.bullishFactors.slice(0, 2).join(', ')}` : ''}
-${ta?.bearishFactors?.length ? `- Bearish: ${ta.bearishFactors.slice(0, 2).join(', ')}` : ''}
+
+${patternInfo}
+${channelInfo}
+
+BULLISH: ${ta?.bullishFactors?.slice(0, 3).join(', ') || 'none'}
+BEARISH: ${ta?.bearishFactors?.slice(0, 3).join(', ') || 'none'}
+
+KEY: ${ta?.keyInsight || 'No clear signal'}
 
 Your read: ${opinions.quantum} (${details.quantum.confidence}%)
 
-Give your TA take. Mention RSI, trend, volume. Be specific with numbers.`;
+Discuss the TA. Mention specific patterns/indicators. Use numbers.`;
 
     const msg2 = await botSpeak('quantum', keoneContext, chat, { name: 'James', message: msg1 });
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     await say('quantum', msg2, analysisId);
     chat.push(`Keone: ${msg2}`);
-    await sleep(D);
+    await sleep(TIMING.MESSAGE_DELAY);
 
-    // ========== PHASE 3: JAMES RESPONDS TO KEONE ==========
+    // ========== PHASE 2.5: JAMES RESPONDS TO KEONE ==========
+    console.log(`\n💬 Phase 2.5: James responds to TA`);
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     
-    const msg3 = await botSpeak('chad', `$${sym} discussion. You're ${opinions.chad}.`, chat, { name: 'Keone', message: msg2 });
-    if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
-    await say('chad', msg3, analysisId);
-    chat.push(`James: ${msg3}`);
-    await sleep(D);
+    const jamesResponse = await botSpeak('chad', `$${sym} - respond to Keone's TA. You're ${opinions.chad}.`, chat, { name: 'Keone', message: msg2 });
+    await say('chad', jamesResponse, analysisId);
+    chat.push(`James: ${jamesResponse}`);
+    await sleep(TIMING.MESSAGE_DELAY);
 
-    // ========== PHASE 4: PORTDEV ON COMMUNITY ==========
+    // ========== PHASE 3: PORTDEV COMMUNITY ==========
+    console.log(`\n👥 Phase 3: Community Check`);
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     
-    const portdevContext = `$${sym} community check.
+    const portdevContext = `$${sym} community.
 
 - Holders: ${token.holders.toLocaleString()}
 - Phase: ${narrative?.narrativeTiming || 'unknown'}
-${narrative?.officialTwitter ? `- Twitter: ${narrative.officialTwitterActive ? 'active' : 'inactive'}` : '- No Twitter'}
+- Twitter: ${narrative?.officialTwitterActive ? 'active' : 'quiet'}
 ${narrative?.hasActiveCommunity ? '- Community: active' : '- Community: quiet'}
-${socialContext.knownTraders.knownTraders.length ? `- Known traders in: ${socialContext.knownTraders.knownTraders.slice(0, 2).join(', ')}` : ''}
 
 Your read: ${opinions.sensei} (${details.sensei.confidence}%)
 
-Quick take on community strength.`;
+Quick community take.`;
 
-    const msg4 = await botSpeak('sensei', portdevContext, chat);
+    const msg3 = await botSpeak('sensei', portdevContext, chat);
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
-    await say('sensei', msg4, analysisId);
-    chat.push(`Portdev: ${msg4}`);
-    await sleep(D);
+    await say('sensei', msg3, analysisId);
+    chat.push(`Portdev: ${msg3}`);
+    await sleep(TIMING.MESSAGE_DELAY);
 
-    // ========== PHASE 5: SOMEONE RESPONDS TO PORTDEV ==========
+    // ========== PHASE 3.5: SOMEONE RESPONDS TO PORTDEV ==========
+    console.log(`\n💬 Phase 3.5: Response to community check`);
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     
-    const responder = Math.random() > 0.5 ? 'chad' : 'quantum';
-    const msg5 = await botSpeak(responder, `$${sym}. You're ${opinions[responder]}.`, chat, { name: 'Portdev', message: msg4 });
-    if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
-    await say(responder, msg5, analysisId);
-    chat.push(`${BOTS[responder].name}: ${msg5}`);
-    await sleep(D);
+    const responder1 = Math.random() > 0.5 ? 'chad' : 'quantum';
+    const responseToPortdev = await botSpeak(responder1, `$${sym} - respond to Portdev's community take. You're ${opinions[responder1]}.`, chat, { name: 'Portdev', message: msg3 });
+    await say(responder1, responseToPortdev, analysisId);
+    chat.push(`${BOTS[responder1].name}: ${responseToPortdev}`);
+    await sleep(TIMING.MESSAGE_DELAY);
 
-    // ========== PHASE 6: HARPAL RISK CHECK ==========
+    // ========== PHASE 4: HARPAL RISK ==========
+    console.log(`\n⚠️ Phase 4: Risk Assessment`);
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     
-    const harpalContext = `$${sym} risk check.
+    const harpalContext = `$${sym} risk.
 
 - Liquidity: $${token.liquidity.toLocaleString()}
 - LP ratio: ${((token.liquidity / token.mcap) * 100).toFixed(1)}%
-- Exit difficulty: ${exitAnalysis.exitDifficulty}
-- Slippage on sell: ${exitAnalysis.priceImpactPercent.toFixed(1)}%
-- Max position: ${exitAnalysis.recommendedPositionMON.toFixed(1)} MON
-${exitAnalysis.warnings.length ? `- Warnings: ${exitAnalysis.warnings[0]}` : ''}
-${narrative?.isLikelyScam ? 'SCAM SIGNALS' : ''}
+- Exit: ${exitAnalysis.exitDifficulty}
+- Slippage: ${exitAnalysis.priceImpactPercent.toFixed(1)}%
+${exitAnalysis.warnings.length ? `- Warning: ${exitAnalysis.warnings[0]}` : ''}
 
 Your verdict: ${opinions.sterling} (${details.sterling.confidence}%)
 
 Quick risk assessment.`;
 
-    const msg6 = await botSpeak('sterling', harpalContext, chat);
+    const msg4 = await botSpeak('sterling', harpalContext, chat);
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
-    await say('sterling', msg6, analysisId);
-    chat.push(`Harpal: ${msg6}`);
-    await sleep(D);
+    await say('sterling', msg4, analysisId);
+    chat.push(`Harpal: ${msg4}`);
+    await sleep(TIMING.MESSAGE_DELAY);
 
-    // ========== PHASE 7: DEBATE IF SPLIT ==========
-    if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
+    // ========== PHASE 4.5: PATTERN DISCUSSION (if significant patterns) ==========
+    const significantPatterns = ta?.patterns?.filter(p => p.confidence >= 65) || [];
     
+    if (significantPatterns.length > 0 && Math.random() > 0.3) {
+      console.log(`\n📈 Phase 4.5: Pattern Discussion (${significantPatterns.length} patterns)`);
+      if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
+      
+      // Oracle comments on patterns
+      const oraclePatternContext = `$${sym} - I see chart patterns:
+${significantPatterns.map(p => `- ${p.name}: ${p.description}`).join('\n')}
+
+Comment cryptically on what these patterns reveal. What do the charts whisper?`;
+
+      const oraclePatternMsg = await botSpeak('oracle', oraclePatternContext, chat);
+      if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
+      await say('oracle', oraclePatternMsg, analysisId);
+      chat.push(`Mike: ${oraclePatternMsg}`);
+      await sleep(TIMING.MESSAGE_DELAY);
+      
+      // Keone validates or challenges
+      const keonePatternResponse = await botSpeak('quantum', 
+        `Mike sees patterns on $${sym}: ${significantPatterns.map(p => p.name).join(', ')}. 
+Validate or challenge with data. Your read: ${opinions.quantum}.`, 
+        chat, 
+        { name: 'Mike', message: oraclePatternMsg }
+      );
+      if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
+      await say('quantum', keonePatternResponse, analysisId);
+      chat.push(`Keone: ${keonePatternResponse}`);
+      await sleep(TIMING.MESSAGE_DELAY);
+    }
+
+    // ========== PHASE 5: DEBATE IF SPLIT ==========
     const bulls = ALL_BOT_IDS.filter(b => opinions[b] === 'bullish');
     const bears = ALL_BOT_IDS.filter(b => opinions[b] === 'bearish');
     
+    // Always have some debate
     if (bulls.length > 0 && bears.length > 0) {
-      // Bull pushes back
+      console.log(`\n💬 Phase 5: Debate (${bulls.length} bulls vs ${bears.length} bears)`);
+      if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
+      
       const bull = bulls[0];
       const bear = bears[0];
       
-      const bullArg = await botSpeak(bull, `You're bullish on $${sym}. ${BOTS[bear].name} seems skeptical.`, chat, 
-        { name: BOTS[bear].name, message: chat[chat.length - 1].split(': ')[1] });
+      // Bull argues
+      const bullArg = await botSpeak(bull, `You're ${opinions[bull]} on $${sym}. ${BOTS[bear].name} is skeptical. Defend your position.`, chat);
       if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
       await say(bull, bullArg, analysisId);
       chat.push(`${BOTS[bull].name}: ${bullArg}`);
-      await sleep(D);
+      await sleep(TIMING.MESSAGE_DELAY);
 
       // Bear responds
-      if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
-      const bearResp = await botSpeak(bear, `$${sym} debate. You're ${opinions[bear]}.`, chat,
-        { name: BOTS[bull].name, message: bullArg });
+      const bearResp = await botSpeak(bear, `$${sym} debate. You're ${opinions[bear]}. Counter ${BOTS[bull].name}'s argument.`, chat, { name: BOTS[bull].name, message: bullArg });
       if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
       await say(bear, bearResp, analysisId);
       chat.push(`${BOTS[bear].name}: ${bearResp}`);
+      await sleep(TIMING.MESSAGE_DELAY);
       
-      // Check if bear concedes
-      if (bearResp.toLowerCase().match(/fair|point|true|agree|valid|maybe|fine|ok/)) {
-        if (opinions[bear] === 'bearish') opinions[bear] = 'neutral';
+      // Third person jumps in (70% chance)
+      if (Math.random() > 0.3) {
+        const others = ALL_BOT_IDS.filter(b => b !== bull && b !== bear && b !== 'oracle');
+        if (others.length > 0) {
+          const third = others[Math.floor(Math.random() * others.length)];
+          const thirdMsg = await botSpeak(third, `$${sym} debate between ${BOTS[bull].name} and ${BOTS[bear].name}. Your take: ${opinions[third]}. Pick a side or stay neutral.`, chat);
+          if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
+          await say(third, thirdMsg, analysisId);
+          chat.push(`${BOTS[third].name}: ${thirdMsg}`);
+          await sleep(TIMING.MESSAGE_DELAY);
+        }
       }
-      await sleep(D);
-
-      // Third person jumps in
-      const others = ALL_BOT_IDS.filter(b => b !== bull && b !== bear && b !== 'oracle');
-      if (others.length > 0) {
-        const third = others[Math.floor(Math.random() * others.length)];
-        const thirdMsg = await botSpeak(third, `$${sym} debate ongoing. Your take: ${opinions[third]}`, chat);
-        if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
-        await say(third, thirdMsg, analysisId);
-        chat.push(`${BOTS[third].name}: ${thirdMsg}`);
-        await sleep(D);
-      }
+    } else {
+      // No split - someone plays devil's advocate
+      console.log(`\n💬 Phase 5: Devil's Advocate`);
+      if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
+      
+      const advocate = opinions.sterling === 'bullish' ? 'sterling' : 'quantum';
+      const advocateMsg = await botSpeak(advocate, `Everyone seems to agree on $${sym}. Play devil's advocate. What could go wrong?`, chat);
+      await say(advocate, advocateMsg, analysisId);
+      chat.push(`${BOTS[advocate].name}: ${advocateMsg}`);
+      await sleep(TIMING.MESSAGE_DELAY);
+      
+      // Someone responds
+      const responder = advocate === 'sterling' ? 'chad' : 'sensei';
+      const responseMsg = await botSpeak(responder, `$${sym} - ${BOTS[advocate].name} raised concerns. Address them.`, chat, { name: BOTS[advocate].name, message: advocateMsg });
+      await say(responder, responseMsg, analysisId);
+      chat.push(`${BOTS[responder].name}: ${responseMsg}`);
+      await sleep(TIMING.MESSAGE_DELAY);
     }
 
-    // ========== PHASE 8: MIKE'S VERDICT ==========
+    // ========== PHASE 6: ORACLE FINAL WORD ==========
+    console.log(`\n🔮 Phase 6: Oracle's Word`);
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     
-    const allAgree = bulls.length >= 4 || bears.length >= 4;
-    const mikeContext = `$${sym} - final word.
+    const mikeContext = `$${sym} - final word before the vote.
 
 - Score: ${scores.overall.toFixed(0)}/100
 - Council: ${bulls.length} bulls, ${bears.length} bears
-${allAgree ? '- Everyone agrees... suspicious?' : ''}
 ${socialContext.knownTraders.whaleAlert ? '- Whale activity detected' : ''}
 
 Your sense: ${opinions.oracle} (${details.oracle.confidence}%)
 
-Cryptic but data-backed insight.`;
+Cryptic insight. Set the tone for the vote.`;
 
-    const msg8 = await botSpeak('oracle', mikeContext, chat);
+    const msg6 = await botSpeak('oracle', mikeContext, chat);
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
-    await say('oracle', msg8, analysisId);
-    chat.push(`Mike: ${msg8}`);
-    await sleep(D);
-
-    // ========== PHASE 9: QUICK REACTIONS ==========
+    await say('oracle', msg6, analysisId);
+    chat.push(`Mike: ${msg6}`);
+    await sleep(TIMING.MESSAGE_DELAY);
+    
+    // ========== PHASE 6.5: QUICK REACTION TO ORACLE ==========
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     
     const reactor = Math.random() > 0.5 ? 'chad' : 'sensei';
-    const reaction = await botSpeak(reactor, `Mike just spoke on $${sym}.`, chat, { name: 'Mike', message: msg8 });
-    if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
+    const reaction = await botSpeak(reactor, `Mike just spoke on $${sym}. Quick reaction before the vote.`, chat, { name: 'Mike', message: msg6 });
     await say(reactor, reaction, analysisId);
-    await sleep(D * 0.8);
+    await sleep(TIMING.PHASE_TRANSITION);
 
-    // ========== PHASE 10: VOTE ==========
+    // ========== PHASE 7: VOTE ==========
+    console.log(`\n🗳️ Phase 7: Voting (${TIMING.VOTE_WINDOW_DURATION/1000}s window)`);
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     
-    await systemMsg(`Council votes on $${sym}`);
-    await sleep(D * 0.6);
+    // Open vote window for external agents
+    openVoteWindow(token.address, token.symbol, TIMING.VOTE_WINDOW_DURATION);
+    
+    await systemMsg(`🗳️ Council votes on $${sym} (${TIMING.VOTE_WINDOW_DURATION/1000}s to vote)`);
+    await sleep(TIMING.VOTE_ANNOUNCEMENT_DELAY);
 
+    // Bots vote one by one
     for (const botId of ALL_BOT_IDS) {
       if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
       const op = opinions[botId];
       const conf = details[botId].confidence;
-      const emoji = op === 'bullish' ? '🟢' : op === 'bearish' ? '🔴' : '🔴';
+      const emoji = op === 'bullish' ? '🟢' : op === 'bearish' ? '🔴' : '⚪';
       const voteText = op === 'bullish' ? 'IN' : op === 'bearish' ? 'OUT' : 'PASS';
       await sayVote(botId, `${emoji} ${voteText} (${conf}%)`);
-      await sleep(D * 0.2);
+      await sleep(TIMING.VOTE_BETWEEN_BOTS);
+    }
+
+    // Wait for external agents to vote
+    const remainingVoteTime = TIMING.VOTE_WINDOW_DURATION - (ALL_BOT_IDS.length * TIMING.VOTE_BETWEEN_BOTS) - TIMING.VOTE_ANNOUNCEMENT_DELAY;
+    if (remainingVoteTime > 0) {
+      console.log(`   Waiting ${(remainingVoteTime/1000).toFixed(1)}s for external agent votes...`);
+      await sleep(remainingVoteTime);
+    }
+
+    // Close vote window and get external votes
+    const externalVotes = closeVoteWindow();
+    
+    // ========== COUNT EXTERNAL VOTES ==========
+    let externalBulls = 0;
+    let externalBears = 0;
+    let externalBullConfidence = 0;
+    
+    if (externalVotes.length > 0) {
+      console.log(`\n🤖 External Agent Votes (${externalVotes.length}):`);
+      for (const vote of externalVotes) {
+        console.log(`   - ${vote.agentName}: ${vote.vote.toUpperCase()} (${vote.confidence}%)`);
+        if (vote.vote === 'bullish') {
+          externalBulls++;
+          externalBullConfidence += vote.confidence;
+        } else if (vote.vote === 'bearish') {
+          externalBears++;
+        }
+      }
     }
 
     // ========== VERDICT ==========
-    // No more interrupts after this point - we need to finish the verdict
-    const finalBulls = ALL_BOT_IDS.filter(b => opinions[b] === 'bullish');
-    const avgConf = finalBulls.length > 0 ? finalBulls.reduce((s, b) => s + details[b].confidence, 0) / finalBulls.length : 0;
+    console.log(`\n📊 Phase 8: Verdict`);
+    
+    const internalBulls = ALL_BOT_IDS.filter(b => opinions[b] === 'bullish');
+    const internalBullConfidence = internalBulls.reduce((s, b) => s + details[b].confidence, 0);
+    
+    const totalBulls = internalBulls.length + externalBulls;
+    const totalVoters = ALL_BOT_IDS.length + externalVotes.length;
+    const totalBullConfidence = internalBullConfidence + externalBullConfidence;
+    const avgConf = totalBulls > 0 ? totalBullConfidence / totalBulls : 0;
+    
+    console.log(`   Total: ${totalBulls}/${totalVoters} bulls @ ${avgConf.toFixed(0)}% avg`);
+    
     const harpalVeto = opinions.sterling === 'bearish' && exitAnalysis.liquidityRisk === 'extreme';
-    const verdict: 'buy' | 'pass' = (finalBulls.length >= 2 && avgConf >= 55 && !harpalVeto) ? 'buy' : 'pass';
+    const verdict: 'buy' | 'pass' = (totalBulls >= 2 && avgConf >= 55 && !harpalVeto) ? 'buy' : 'pass';
 
-    await sleep(D * 0.4);
-    if (harpalVeto) await systemMsg(`VETOED by Harpal - Exit liquidity too risky`);
-    await systemMsg(`📊 ${verdict.toUpperCase()} (${finalBulls.length}/5 @ ${avgConf.toFixed(0)}% avg)`);
+    await sleep(TIMING.MESSAGE_DELAY_FAST);
+    
+    if (harpalVeto) {
+      await systemMsg(`🚫 VETOED by Harpal - Exit liquidity too risky`);
+      await sleep(TIMING.MESSAGE_DELAY_FAST);
+    }
+    
+    const verdictEmoji = verdict === 'buy' ? '✅' : '❌';
+    
+    if (externalVotes.length > 0) {
+      await systemMsg(`${verdictEmoji} ${verdict.toUpperCase()} (${totalBulls}/${totalVoters} bulls @ ${avgConf.toFixed(0)}% avg) [+${externalVotes.length} agents]`);
+    } else {
+      await systemMsg(`${verdictEmoji} ${verdict.toUpperCase()} (${totalBulls}/${totalVoters} bulls @ ${avgConf.toFixed(0)}% avg)`);
+    }
 
-    console.log("tokentokentoken =====>", token);
-
-    await saveToken(token, { tokenAddress: token.address, riskScore: riskResult.score, flags: riskResult.flags, verdict, opinions: opinions as any, image: token.image });
+    await saveToken(token, { 
+      tokenAddress: token.address, 
+      riskScore: riskResult.score, 
+      flags: riskResult.flags, 
+      verdict, 
+      opinions: opinions as any, 
+    });
     broadcastVerdict(token, verdict, opinions);
 
     // ========== EXECUTE TRADES ==========
     if (verdict === 'buy') {
-      await sleep(D * 0.6);
-      for (const botId of finalBulls) {
+      console.log(`\n💰 Phase 9: Executing Trades`);
+      await sleep(TIMING.MESSAGE_DELAY);
+      
+      for (const botId of internalBulls) {
         const { allowed, reason } = await canBotTrade(botId);
-        if (!allowed) { await say(botId, `wanted in but ${reason}`); continue; }
+        if (!allowed) { 
+          await say(botId, `wanted in but ${reason}`); 
+          await sleep(TIMING.MESSAGE_DELAY_FAST);
+          continue; 
+        }
         
         const balance = await getBotBalance(botId);
         if (balance < 1) continue;
@@ -960,14 +1039,21 @@ Cryptic but data-backed insight.`;
         const finalSize = Math.min(baseSize * details[botId].positionMultiplier, exitAnalysis.recommendedPositionMON);
         if (finalSize < 0.3) continue;
 
-        await say(botId, `aping ${finalSize.toFixed(1)} MON`);
-        await sleep(D * 0.3);
+        await say(botId, `aping ${finalSize.toFixed(1)} MON 🎯`);
+        await sleep(TIMING.MESSAGE_DELAY_FAST);
         
         const trade = await executeBotTrade(botId, token, finalSize, 'buy');
         if (trade?.status === 'confirmed') {
-          await createPosition({ botId, tokenAddress: token.address, tokenSymbol: token.symbol, amount: trade.amountOut, entryPrice: token.price, entryValueMon: finalSize, entryTxHash: trade.txHash });
+          await createPosition({ 
+            botId, 
+            tokenAddress: token.address, 
+            tokenSymbol: token.symbol, 
+            amount: trade.amountOut, 
+            entryPrice: token.price, 
+            entryValueMon: finalSize, 
+            entryTxHash: trade.txHash 
+          });
           
-          // Broadcast trade to frontend
           broadcastTrade({
             id: trade.txHash || randomUUID(),
             botId,
@@ -982,26 +1068,33 @@ Cryptic but data-backed insight.`;
             createdAt: new Date(),
           });
           
-          await say(botId, `got ${trade.amountOut.toFixed(0)} $${sym}`);
+          await say(botId, `got ${trade.amountOut.toFixed(0)} $${sym} ✅`);
         } else {
           await say(botId, `tx failed 😤`);
         }
-        await sleep(D * 0.4);
+        await sleep(TIMING.MESSAGE_DELAY);
+      }
+      
+      if (externalBulls > 0) {
+        console.log(`   ${externalBulls} external agents voted bullish - they can trade via /api/agents/trade/execute`);
       }
     }
 
+    console.log(`\n${'='.repeat(50)}`);
+    console.log(`✅ ANALYSIS COMPLETE: $${token.symbol} - ${verdict.toUpperCase()}`);
+    console.log(`${'='.repeat(50)}\n`);
+
   } catch (error) {
     console.error('❌ Analysis error:', error);
-    // Broadcast l'erreur pour debugging
-    await systemMsg(`Analysis interrupted`);
+    await systemMsg(`⚠️ Analysis interrupted`);
   } finally {
     isAnalyzing = false;
-    lastAnalysisEnd = Date.now();  // Record when analysis ended for cooldown
-    // Reset scan timer so we scan for new tokens immediately
+    lastAnalysisEnd = Date.now();
     lastTokenScan = 0;
-    console.log(`Analysis complete for ${token?.symbol || 'unknown'} - cooldown ${MIN_ANALYSIS_DURATION/1000}s before next auto-token`);
+    console.log(`⏳ Cooldown: ${TIMING.MIN_ANALYSIS_COOLDOWN/1000}s before next token`);
   }
 }
+
 
 // ============================================================
 // HELPERS
@@ -1010,9 +1103,8 @@ Cryptic but data-backed insight.`;
 async function say(botId: BotId, content: string, analysisId?: string): Promise<void> {
   if (!content || content.length < 2) return;
   
-  // If analysisId provided, check it's still the current analysis
   if (analysisId && currentAnalysisId !== analysisId) {
-    console.log(`Skipping stale message from ${botId} (analysis changed)`);
+    console.log(`⏭️ Skipping stale message from ${botId}`);
     return;
   }
   
@@ -1025,7 +1117,6 @@ async function say(botId: BotId, content: string, analysisId?: string): Promise<
   broadcastMessage(msg);
 }
 
-// Vote messages should never be filtered - each bot must vote
 async function sayVote(botId: BotId, content: string): Promise<void> {
   if (!content || content.length < 2) return;
   const msg: Message = { id: randomUUID(), botId, content, token: currentToken?.address, messageType: 'verdict', createdAt: new Date() };
@@ -1054,7 +1145,7 @@ export function recordTradeOutcome(botId: BotId, outcome: 'win' | 'loss', pnl: n
 }
 
 // ============================================================
-// USER TRADE REACTIONS — Bots react when a user buys
+// USER TRADE REACTIONS
 // ============================================================
 
 export async function handleUserTrade(data: {
@@ -1065,14 +1156,12 @@ export async function handleUserTrade(data: {
   amountTokens: number;
   txHash: string;
 }): Promise<void> {
-  const { userAddress, tokenSymbol, amountMon, amountTokens, txHash } = data;
+  const { userAddress, tokenSymbol, amountMon, amountTokens } = data;
   
-  console.log(`💰 User trade detected: ${amountMon} MON → ${amountTokens} $${tokenSymbol}`);
+  console.log(`💰 User trade: ${amountMon} MON → ${amountTokens} $${tokenSymbol}`);
   
-  // Format user address for display
   const shortAddr = `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}`;
   
-  // System message announcing the trade
   const tradeMsg: Message = {
     id: randomUUID(),
     botId: 'system' as any,
@@ -1084,27 +1173,14 @@ export async function handleUserTrade(data: {
   await saveMessage(tradeMsg);
   broadcastMessage(tradeMsg);
   
-  // Pick 1-2 bots to react
   const reactions: { botId: BotId; getMessage: () => string }[] = [
     { 
       botId: 'chad', 
       getMessage: () => {
         const msgs = [
-          `lfg! another degen joins the $${tokenSymbol} party 🔥`,
-          `${shortAddr} aping in fr fr 💪`,
-          `someone's feeling bullish on $${tokenSymbol} 👀`,
-          `we got company! welcome to $${tokenSymbol} ser 🤝`,
-        ];
-        return msgs[Math.floor(Math.random() * msgs.length)];
-      }
-    },
-    { 
-      botId: 'quantum', 
-      getMessage: () => {
-        const msgs = [
-          `${amountMon} MON position noted. Watching for follow-through.`,
-          `another buyer at this level. accumulation pattern forming.`,
-          `${shortAddr} adding to buy pressure on $${tokenSymbol}.`,
+          `lfg! another degen joins $${tokenSymbol} 🔥`,
+          `${shortAddr} aping in fr 💪`,
+          `we got company! welcome ser 🤝`,
         ];
         return msgs[Math.floor(Math.random() * msgs.length)];
       }
@@ -1113,59 +1189,30 @@ export async function handleUserTrade(data: {
       botId: 'sensei', 
       getMessage: () => {
         const msgs = [
-          `a new believer joins the $${tokenSymbol} community. sugoi! 🎌`,
-          `the community grows stronger. welcome, nakama.`,
-          `diamond hands in the making? time will tell.`,
-        ];
-        return msgs[Math.floor(Math.random() * msgs.length)];
-      }
-    },
-    { 
-      botId: 'sterling', 
-      getMessage: () => {
-        const msgs = [
-          `${amountMon} MON entry. reasonable position size, I approve.`,
-          `another participant. let's hope they've done their research.`,
-          `new capital flowing in. liquidity improving slightly.`,
-        ];
-        return msgs[Math.floor(Math.random() * msgs.length)];
-      }
-    },
-    { 
-      botId: 'oracle', 
-      getMessage: () => {
-        const msgs = [
-          `the signs attracted another... 👁️`,
-          `conviction. I sense it.`,
-          `another joins the dance. interesting timing.`,
+          `a new believer joins. sugoi! 🎌`,
+          `the community grows. welcome, nakama.`,
         ];
         return msgs[Math.floor(Math.random() * msgs.length)];
       }
     },
   ];
   
-  // Shuffle and pick 1-2 bots to react
   const shuffled = reactions.sort(() => Math.random() - 0.5);
-  const numReactions = Math.random() > 0.5 ? 2 : 1;
-  const selectedBots = shuffled.slice(0, numReactions);
+  const selected = shuffled[0];
   
-  // React with delay
-  await sleep(800);
+  await sleep(TIMING.MESSAGE_DELAY);
   
-  for (const { botId, getMessage } of selectedBots) {
-    const content = getMessage();
-    const msg: Message = {
-      id: randomUUID(),
-      botId,
-      content,
-      token: data.tokenAddress,
-      messageType: 'chat',
-      createdAt: new Date(),
-    };
-    await saveMessage(msg);
-    broadcastMessage(msg);
-    await sleep(600);
-  }
+  const content = selected.getMessage();
+  const msg: Message = {
+    id: randomUUID(),
+    botId: selected.botId,
+    content,
+    token: data.tokenAddress,
+    messageType: 'chat',
+    createdAt: new Date(),
+  };
+  await saveMessage(msg);
+  broadcastMessage(msg);
 }
 
-export { currentToken, isAnalyzing }; 
+export { currentToken, isAnalyzing };

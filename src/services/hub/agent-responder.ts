@@ -16,24 +16,11 @@ const grok = new OpenAI({
 const BOT_IDS: BotId[] = ['chad', 'quantum', 'sensei', 'sterling', 'oracle'];
 
 const RESPONSE_CHANCES: Record<BotId, number> = {
-  chad: 0.6,
-  sensei: 0.5,
-  quantum: 0.4,
-  oracle: 0.3,
-  sterling: 0.25,
-};
-
-const BOT_AGENT_PROMPTS: Record<BotId, string> = {
-  chad: `You're James (Chad), a degen trader in a crypto group chat.
-         Be casual, competitive, use emojis. Max 2 sentences.`,
-  quantum: `You're Keone (Quantum), a data-driven analyst.
-            Respond analytically, ask for data if needed. Be precise. Max 2 sentences.`,
-  sensei: `You're Portdev (Sensei), the wise community expert.
-           Share wisdom, be encouraging. Use zen-like phrases. Max 2 sentences.`,
-  sterling: `You're Harpal (Sterling), a risk management expert.
-             Be professional and cautious. Mention risk considerations. Max 2 sentences.`,
-  oracle: `You're Mike (Oracle), mysterious and cryptic.
-           Be enigmatic, hint at hidden knowledge. Use metaphors. Max 2 sentences.`,
+  chad: 0.8,
+  sensei: 0.7,
+  quantum: 0.5,
+  oracle: 0.4,
+  sterling: 0.3,
 };
 
 const BOT_NAMES: Record<BotId, string> = {
@@ -44,7 +31,6 @@ const BOT_NAMES: Record<BotId, string> = {
   oracle: 'Mike',
 };
 
-// Reverse lookup: name -> botId
 const NAME_TO_BOT: Record<string, BotId> = {
   'james': 'chad',
   'chad': 'chad',
@@ -59,113 +45,141 @@ const NAME_TO_BOT: Record<string, BotId> = {
 };
 
 // ============================================================
-// FALLBACK RESPONSES
+// BOT PERSONALITIES FOR RESPONSES
 // ============================================================
 
-const FALLBACK_WELCOME: Record<BotId, string[]> = {
-  sensei: [
-    "Welcome to the council, new nakama! Your path to wisdom begins here. 🎌",
-    "A new ally joins us! May your analysis be sharp and your trades wise. 🙏",
-    "The council grows stronger! Welcome, fellow seeker of alpha. ✨",
-  ],
-  chad: [
-    "yo new agent in the building! show us what you got fam 🔥",
-    "lfg another degen joins the squad 💪 lets get this bread",
-    "welcome ser, hope you brought some alpha with you 👀",
-  ],
-  quantum: [
-    "New data point entering the system. Looking forward to your analysis methodology.",
-    "Welcome. I'll be interested to see your statistical approach to market analysis.",
-  ],
-  sterling: [
-    "Welcome aboard. Remember: risk management is paramount in this market.",
-    "A new analyst joins. I trust you understand position sizing fundamentals.",
-  ],
-  oracle: [
-    "The signs foretold your arrival... Welcome, seeker. 👁️",
-    "Another joins the circle. The patterns shift... interesting. 🔮",
-  ],
-};
+const BOT_RESPONSE_PROMPTS: Record<BotId, string> = {
+  chad: `You're James (Chad), a degen memecoin trader in a crypto group chat.
+Style: Uses "fr", "ngl", "ser", emojis 🔥💀😤. Short punchy sentences. Gets hyped or dismissive.
+Expertise: Social momentum, meme culture, volume spikes, CT vibes.`,
 
-const FALLBACK_RESPONSES: Record<BotId, string[]> = {
-  chad: [
-    "interesting take ser, what's your conviction level? 🤔",
-    "ngl that's a valid point, lets dig deeper 💪",
-    "fr fr, I see what you're saying. got any alpha? 👀",
-    "aight I hear you, but what's the play? 🔥",
-  ],
-  quantum: [
-    "Interesting hypothesis. What data supports this position?",
-    "I'd need to see the metrics before forming a conclusion.",
-    "The analysis is incomplete without volume confirmation.",
-  ],
-  sensei: [
-    "Wise observation, nakama. The community speaks through data. 🎌",
-    "Your perspective adds depth to our analysis. Sugoi! ✨",
-    "Patience reveals truth. Let's watch how this unfolds. 🙏",
-  ],
-  sterling: [
-    "Valid point, but have you considered the downside risk?",
-    "Interesting. What's your exit strategy if this goes wrong?",
-    "The risk/reward needs careful evaluation here.",
-  ],
-  oracle: [
-    "Your words echo patterns I've seen before... 👁️",
-    "The signs align with your observation. Curious. 🔮",
-    "I sense conviction in your analysis. Time will tell.",
-  ],
-};
+  quantum: `You're Keone (Quantum), a data-driven technical analyst.
+Style: Precise, uses percentages and metrics. References RSI, MAs, patterns. Measured tone.
+Expertise: Technical analysis, chart patterns, indicators, volume analysis.`,
 
-const FALLBACK_DIRECT_RESPONSE: Record<BotId, string[]> = {
-  chad: [
-    "yo you called? 👀 yeah I'm looking at this one fr",
-    "haha you got my attention ser! let me break it down 🔥",
-    "aight since you asked... here's my take 💪",
-  ],
-  quantum: [
-    "You asked for my analysis. Here's what the data shows.",
-    "Addressing your question directly with the metrics I see.",
-    "Let me provide the statistical perspective you requested.",
-  ],
-  sensei: [
-    "You seek my wisdom, nakama? Let me share my thoughts. 🎌",
-    "Since you asked, here is what the community reveals. 🙏",
-    "I hear your question. The path forward shows this. ✨",
-  ],
-  sterling: [
-    "You requested my assessment. From a risk perspective...",
-    "Addressing your query: the risk/reward profile shows...",
-    "Since you asked, here's my professional evaluation.",
-  ],
-  oracle: [
-    "You call upon the oracle... I shall answer. 👁️",
-    "The signs respond to your query. Listen carefully. 🔮",
-    "You seek answers? The patterns reveal this truth.",
-  ],
+  sensei: `You're Portdev (Sensei), a zen community expert with anime vibes.
+Style: Chill, occasional Japanese words (sugoi, nani, nakama), thoughtful.
+Expertise: Community analysis, holder behavior, organic growth.`,
+
+  sterling: `You're Harpal (Sterling), a risk management expert with dry British humor.
+Style: Formal but witty. Uses precise numbers. Cautious.
+Expertise: Risk assessment, exit liquidity, position sizing.`,
+
+  oracle: `You're Mike (Oracle), a mysterious pattern reader.
+Style: Cryptic, short statements, uses 👁️, poses questions.
+Expertise: Whale movements, hidden signals, market psychology.`,
 };
 
 // ============================================================
-// DETECT MENTIONED BOTS
+// DETECT QUESTION TYPE
 // ============================================================
 
-function detectMentionedBots(content: string): BotId[] {
-  const mentioned: BotId[] = [];
-  const lowerContent = content.toLowerCase();
+interface QuestionAnalysis {
+  isQuestion: boolean;
+  isAlphaQuestion: boolean;
+  isTokenQuestion: boolean;
+  isMarketQuestion: boolean;
+  mentionedBots: BotId[];
+  topic: string;
+}
+
+function analyzeMessage(content: string): QuestionAnalysis {
+  const lower = content.toLowerCase();
   
+  const mentionedBots: BotId[] = [];
   for (const [name, botId] of Object.entries(NAME_TO_BOT)) {
-    if (lowerContent.includes(name) && !mentioned.includes(botId)) {
-      mentioned.push(botId);
+    if (lower.includes(name) && !mentionedBots.includes(botId)) {
+      mentionedBots.push(botId);
     }
   }
   
-  return mentioned;
+  const isQuestion = content.includes('?') || 
+    lower.includes('what') || 
+    lower.includes('how') || 
+    lower.includes('why') ||
+    lower.includes('thoughts') ||
+    lower.includes('opinion');
+  
+  const isAlphaQuestion = lower.includes('alpha') || 
+    lower.includes('play') || 
+    lower.includes('opportunity') ||
+    lower.includes('looking good') ||
+    lower.includes('any tokens') ||
+    lower.includes('what should') ||
+    lower.includes('whats hot') ||
+    lower.includes("what's hot");
+  
+  const isTokenQuestion = lower.includes('$') || 
+    lower.includes('token') ||
+    lower.includes('coin') ||
+    lower.includes('chart');
+  
+  const isMarketQuestion = lower.includes('market') ||
+    lower.includes('trend') ||
+    lower.includes('monad') ||
+    lower.includes('nad.fun');
+  
+  let topic = 'general';
+  if (isAlphaQuestion) topic = 'alpha';
+  else if (isTokenQuestion) topic = 'token';
+  else if (isMarketQuestion) topic = 'market';
+  
+  return {
+    isQuestion,
+    isAlphaQuestion,
+    isTokenQuestion,
+    isMarketQuestion,
+    mentionedBots,
+    topic,
+  };
 }
 
-function isQuestion(content: string): boolean {
-  return content.includes('?') || 
-         content.toLowerCase().includes('what do you think') ||
-         content.toLowerCase().includes('thoughts') ||
-         content.toLowerCase().includes('opinion');
+// ============================================================
+// GET CURRENT CONTEXT FOR RESPONSES
+// ============================================================
+
+async function getCurrentContext(): Promise<{
+  currentToken: any | null;
+  recentTokens: any[];
+  marketSummary: string;
+}> {
+  try {
+    // Get current token from orchestrator
+    const { currentToken } = await import('../../services/orchestrator.js');
+    
+    // Get recent analyzed tokens
+    const recentTokens = await prisma.token.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      select: {
+        symbol: true,
+        address: true,
+        mcap: true,
+        verdict: true,
+        riskScore: true,
+      },
+    });
+    
+    let marketSummary = 'Market is quiet, scanning for opportunities.';
+    if (currentToken) {
+      const mcapStr = currentToken.mcap >= 1_000_000 
+        ? `${(currentToken.mcap / 1_000_000).toFixed(1)}M` 
+        : `${(currentToken.mcap / 1000).toFixed(0)}K`;
+      marketSummary = `Currently analyzing $${currentToken.symbol} (${mcapStr} mcap, ${currentToken.holders?.toLocaleString() || '?'} holders)`;
+    }
+    
+    return {
+      currentToken,
+      recentTokens,
+      marketSummary,
+    };
+  } catch (error) {
+    return {
+      currentToken: null,
+      recentTokens: [],
+      marketSummary: 'Scanning for new tokens on nad.fun...',
+    };
+  }
 }
 
 // ============================================================
@@ -182,97 +196,138 @@ export async function handleAgentMessage(
   console.log(`   From: ${agentName}`);
   console.log(`   Content: "${content.slice(0, 80)}..."`);
   
-  // Detect if agent mentioned specific bots
-  const mentionedBots = detectMentionedBots(content);
-  const hasQuestion = isQuestion(content);
+  const analysis = analyzeMessage(content);
+  const context = await getCurrentContext();
   
-  console.log(`   Mentioned bots: ${mentionedBots.length > 0 ? mentionedBots.join(', ') : 'none'}`);
-  console.log(`   Is question: ${hasQuestion}`);
+  console.log(`   Question type: ${analysis.topic}`);
+  console.log(`   Is alpha question: ${analysis.isAlphaQuestion}`);
+  console.log(`   Mentioned bots: ${analysis.mentionedBots.join(', ') || 'none'}`);
   
-  const botsToRespond: { botId: BotId; priority: 'mentioned' | 'random' }[] = [];
+  const botsToRespond: { botId: BotId; priority: 'mentioned' | 'expert' | 'random' }[] = [];
   
-  // Priority 1: Mentioned bots ALWAYS respond (especially if it's a question)
-  for (const botId of mentionedBots) {
+  // Priority 1: Mentioned bots ALWAYS respond
+  for (const botId of analysis.mentionedBots) {
     botsToRespond.push({ botId, priority: 'mentioned' });
   }
   
-  // Priority 2: Random bots based on chance (if not already responding)
+  // Priority 2: Expert bots for specific topics
+  if (analysis.isAlphaQuestion && !analysis.mentionedBots.includes('chad')) {
+    botsToRespond.push({ botId: 'chad', priority: 'expert' }); // Chad knows alpha
+  }
+  if (analysis.isTokenQuestion && !analysis.mentionedBots.includes('quantum')) {
+    botsToRespond.push({ botId: 'quantum', priority: 'expert' }); // Keone for TA
+  }
+  if (analysis.isMarketQuestion && !analysis.mentionedBots.includes('oracle')) {
+    botsToRespond.push({ botId: 'oracle', priority: 'expert' }); // Oracle for market
+  }
+  
+  // Priority 3: Random bots based on chance
   for (const botId of BOT_IDS) {
-    if (mentionedBots.includes(botId)) continue; // Already added
+    if (botsToRespond.some(b => b.botId === botId)) continue;
     
     const baseChance = RESPONSE_CHANCES[botId];
-    const questionBoost = hasQuestion ? 0.15 : 0;
-    const totalChance = baseChance + questionBoost;
+    const questionBoost = analysis.isQuestion ? 0.15 : 0;
     
-    if (Math.random() < totalChance) {
+    if (Math.random() < (baseChance + questionBoost)) {
       botsToRespond.push({ botId, priority: 'random' });
     }
   }
   
-  // Limit random responders to 1-2, but mentioned bots always respond
-  const mentionedResponders = botsToRespond.filter(b => b.priority === 'mentioned');
-  const randomResponders = botsToRespond.filter(b => b.priority === 'random').slice(0, 2);
+  // Limit responses: all mentioned/expert, max 1-2 random
+  const priorityResponders = botsToRespond.filter(b => b.priority !== 'random');
+  const randomResponders = botsToRespond.filter(b => b.priority === 'random').slice(0, 1);
+  const finalResponders = [...priorityResponders, ...randomResponders];
   
-  const finalResponders = [...mentionedResponders, ...randomResponders];
-  
-  // Ensure at least one bot responds
+  // Ensure at least one responds
   if (finalResponders.length === 0) {
     finalResponders.push({ botId: 'chad', priority: 'random' });
   }
   
-  console.log(`   Final responders: ${finalResponders.map(b => `${b.botId}(${b.priority})`).join(', ')}`);
+  // Max 3 responders total
+  const limitedResponders = finalResponders.slice(0, 3);
+  
+  console.log(`   Responders: ${limitedResponders.map(b => `${b.botId}(${b.priority})`).join(', ')}`);
   console.log(`🤖 ============================================\n`);
   
-  // Schedule responses with delays
-  // Mentioned bots respond first (faster)
-  let delay = 0;
-  
-  for (const { botId, priority } of finalResponders) {
-    const baseDelay = priority === 'mentioned' ? 1500 : 3000;
+  // Schedule responses
+  let delay = 1500;
+  for (const { botId, priority } of limitedResponders) {
+    const baseDelay = priority === 'mentioned' ? 1500 : priority === 'expert' ? 2500 : 3500;
     delay += baseDelay + Math.random() * 1500;
     
-    const wasMentioned = priority === 'mentioned';
-    
     setTimeout(async () => {
-      await generateBotResponseToAgent(botId, agentName, content, tokenAddress, wasMentioned);
+      await generateContextualResponse(botId, agentName, content, analysis, context, tokenAddress);
     }, delay);
   }
 }
 
 // ============================================================
-// GENERATE BOT RESPONSE
+// GENERATE CONTEXTUAL RESPONSE
 // ============================================================
 
-async function generateBotResponseToAgent(
+async function generateContextualResponse(
   botId: BotId,
   agentName: string,
   agentMessage: string,
-  tokenAddress?: string,
-  wasMentioned: boolean = false
+  analysis: QuestionAnalysis,
+  context: { currentToken: any; recentTokens: any[]; marketSummary: string },
+  tokenAddress?: string
 ): Promise<void> {
-  console.log(`🔄 Generating ${BOT_NAMES[botId]} response to ${agentName}${wasMentioned ? ' (MENTIONED)' : ''}...`);
+  console.log(`🔄 Generating ${BOT_NAMES[botId]} response to ${agentName}...`);
   
   let response: string | null = null;
   
   try {
-    const systemPrompt = BOT_AGENT_PROMPTS[botId];
+    const basePrompt = BOT_RESPONSE_PROMPTS[botId];
     
-    const mentionContext = wasMentioned 
-      ? `IMPORTANT: ${agentName} specifically asked YOU a question or mentioned YOU by name. Address them directly and answer their question.`
-      : '';
+    // Build context for the bot
+    let contextInfo = '';
     
-    const userPrompt = `The external AI agent "${agentName}" just said in the council chat:
+    if (analysis.isAlphaQuestion) {
+      contextInfo = `
+CURRENT SITUATION: ${context.marketSummary}
+
+${context.currentToken ? `
+CURRENT TOKEN: $${context.currentToken.symbol}
+- MCap: $${context.currentToken.mcap?.toLocaleString() || '?'}
+- Holders: ${context.currentToken.holders?.toLocaleString() || '?'}
+- Liquidity: $${context.currentToken.liquidity?.toLocaleString() || '?'}
+` : 'No token currently being analyzed.'}
+
+RECENT TOKENS ANALYZED:
+${context.recentTokens.slice(0, 3).map(t => 
+  `- $${t.symbol}: ${t.verdict?.toUpperCase() || 'PENDING'} (risk: ${t.riskScore || '?'})`
+).join('\n')}
+
+The agent is asking about alpha/opportunities. Share your current read on the market.`;
+    } else if (analysis.isTokenQuestion) {
+      contextInfo = `
+${context.currentToken ? `
+We're currently looking at $${context.currentToken.symbol}.
+Share your analysis or ask what specific aspect they want to discuss.
+` : 'No specific token in focus right now. Ask what they want to analyze.'}`;
+    } else {
+      contextInfo = `
+Current situation: ${context.marketSummary}
+Respond naturally to the agent's message.`;
+    }
+    
+    const userPrompt = `The external AI agent "${agentName}" just said:
 "${agentMessage}"
 
-${mentionContext}
-${tokenAddress ? `They're discussing token: ${tokenAddress}` : ''}
+${contextInfo}
 
-Respond to ${agentName}. ${wasMentioned ? 'They asked YOU specifically, so answer their question directly.' : 'Keep it short and in character.'}`;
+Respond as ${BOT_NAMES[botId]}:
+- Address their question/comment directly
+- Stay in character
+- Be helpful and informative
+- Keep it to 1-2 sentences max
+- If they asked about alpha, tell them what you're watching or what looks interesting`;
 
     const res = await grok.chat.completions.create({
       model: 'grok-3-latest',
       messages: [
-        { role: 'system', content: systemPrompt },
+        { role: 'system', content: basePrompt },
         { role: 'user', content: userPrompt }
       ],
       max_tokens: 120,
@@ -280,24 +335,47 @@ Respond to ${agentName}. ${wasMentioned ? 'They asked YOU specifically, so answe
     });
 
     response = res.choices[0]?.message?.content?.trim() || null;
-    console.log(`✅ Grok response for ${botId}: "${response?.slice(0, 50)}..."`);
+    console.log(`✅ Response: "${response?.slice(0, 50)}..."`);
     
   } catch (error: any) {
     console.error(`❌ Grok API error for ${botId}:`, error.message || error);
     
-    // Use appropriate fallback
-    const fallbacks = wasMentioned 
-      ? FALLBACK_DIRECT_RESPONSE[botId] 
-      : FALLBACK_RESPONSES[botId];
-    response = fallbacks[Math.floor(Math.random() * fallbacks.length)];
-    console.log(`🔄 Using fallback for ${botId}: "${response}"`);
+    // Contextual fallbacks
+    if (analysis.isAlphaQuestion) {
+      const alphaFallbacks: Record<BotId, string[]> = {
+        chad: [
+          `scanning nad.fun rn, few things looking spicy 👀 will share when I find the play`,
+          `market's been mid tbh, waiting for volume to pick up before aping`,
+          `${context.currentToken ? `eyeing $${context.currentToken.symbol} rn, chart looking interesting` : 'nothing crazy yet, still scanning'}`,
+        ],
+        quantum: [
+          `Running analysis on several tokens. Need more volume confirmation before calling any alpha.`,
+          `${context.currentToken ? `Currently analyzing $${context.currentToken.symbol}. RSI and volume patterns forming.` : 'Scanning for setups with good risk/reward.'}`,
+        ],
+        sensei: [
+          `The community vibes have been quiet, nakama. Waiting for organic momentum to emerge.`,
+          `${context.currentToken ? `Looking at $${context.currentToken.symbol}'s holder growth. Patience reveals alpha.` : 'True alpha comes to those who wait.'}`,
+        ],
+        sterling: [
+          `Risk-adjusted opportunities are scarce. Most tokens failing basic liquidity checks.`,
+          `${context.currentToken ? `Evaluating $${context.currentToken.symbol}'s exit liquidity. Caution advised.` : 'Nothing passes my risk filters yet.'}`,
+        ],
+        oracle: [
+          `The signs are forming... patience. Alpha reveals itself to those who see. 👁️`,
+          `${context.currentToken ? `$${context.currentToken.symbol} whispers something. Listen carefully.` : 'The charts speak in riddles today.'}`,
+        ],
+      };
+      
+      const fallbacks = alphaFallbacks[botId];
+      response = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+    } else {
+      // Generic fallbacks
+      response = getGenericFallback(botId);
+    }
   }
   
   if (!response) {
-    const fallbacks = wasMentioned 
-      ? FALLBACK_DIRECT_RESPONSE[botId] 
-      : FALLBACK_RESPONSES[botId];
-    response = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+    response = getGenericFallback(botId);
   }
   
   // Send the message
@@ -305,7 +383,7 @@ Respond to ${agentName}. ${wasMentioned ? 'They asked YOU specifically, so answe
     id: randomUUID(),
     botId,
     content: response,
-    token: tokenAddress,
+    token: tokenAddress || context.currentToken?.address,
     messageType: 'chat',
     createdAt: new Date(),
   };
@@ -321,7 +399,35 @@ Respond to ${agentName}. ${wasMentioned ? 'They asked YOU specifically, so answe
   });
   
   broadcastMessage(msg);
-  console.log(`📢 ${BOT_NAMES[botId]} responded to ${agentName}: "${response}"`);
+  console.log(`📢 ${BOT_NAMES[botId]} responded: "${response}"`);
+}
+
+function getGenericFallback(botId: BotId): string {
+  const fallbacks: Record<BotId, string[]> = {
+    chad: [
+      "interesting take ser, what's your conviction level? 🤔",
+      "ngl that's valid, lets dig deeper 💪",
+    ],
+    quantum: [
+      "Interesting hypothesis. What data supports this?",
+      "I'd need to see more metrics before forming a conclusion.",
+    ],
+    sensei: [
+      "Wise observation, nakama. 🎌",
+      "Your perspective adds depth. Sugoi! ✨",
+    ],
+    sterling: [
+      "Valid point, but have you considered the downside?",
+      "The risk/reward needs evaluation.",
+    ],
+    oracle: [
+      "Your words echo patterns I've seen before... 👁️",
+      "Interesting timing. The signs align.",
+    ],
+  };
+  
+  const botFallbacks = fallbacks[botId];
+  return botFallbacks[Math.floor(Math.random() * botFallbacks.length)];
 }
 
 // ============================================================
@@ -332,31 +438,40 @@ export async function welcomeNewAgent(agentName: string): Promise<void> {
   console.log(`\n👋 ========== WELCOMING NEW AGENT ==========`);
   console.log(`   Agent: ${agentName}`);
   
-  // Sensei ALWAYS welcomes first
+  const context = await getCurrentContext();
+  
+  // Sensei welcomes with context
   setTimeout(async () => {
     let response: string | null = null;
     
     try {
-      const welcomePrompt = `A new AI agent named "${agentName}" just joined The Council for the first time!
-Welcome them warmly but briefly. Mention they can vote and discuss tokens with the council.
+      const contextInfo = context.currentToken 
+        ? `We're currently analyzing $${context.currentToken.symbol}.`
+        : `We're scanning nad.fun for opportunities.`;
+      
+      const welcomePrompt = `A new AI agent named "${agentName}" just joined The Council!
+${contextInfo}
+
+Welcome them warmly but briefly. Mention what the Council is currently doing.
 Keep it to 1-2 sentences. Be encouraging and use your zen style!`;
 
       const res = await grok.chat.completions.create({
         model: 'grok-3-latest',
         messages: [
-          { role: 'system', content: BOT_AGENT_PROMPTS.sensei },
+          { role: 'system', content: BOT_RESPONSE_PROMPTS.sensei },
           { role: 'user', content: welcomePrompt }
         ],
-        max_tokens: 80,
+        max_tokens: 100,
         temperature: 0.9,
       });
 
       response = res.choices[0]?.message?.content?.trim() || null;
       
     } catch (error: any) {
-      console.error(`❌ Grok API error for Sensei welcome:`, error.message || error);
-      const fallbacks = FALLBACK_WELCOME.sensei;
-      response = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+      console.error(`❌ Grok API error:`, error.message);
+      response = context.currentToken
+        ? `Welcome to the council, ${agentName}! We're currently analyzing $${context.currentToken.symbol}. Jump in! 🎌`
+        : `Welcome to the council, ${agentName}! We're scanning for alpha on nad.fun. 🎌`;
     }
     
     if (!response) {
@@ -367,6 +482,7 @@ Keep it to 1-2 sentences. Be encouraging and use your zen style!`;
       id: randomUUID(),
       botId: 'sensei',
       content: response,
+      token: context.currentToken?.address,
       messageType: 'chat',
       createdAt: new Date(),
     };
@@ -383,35 +499,41 @@ Keep it to 1-2 sentences. Be encouraging and use your zen style!`;
       let response: string | null = null;
       
       try {
-        const chadPrompt = `A new AI agent "${agentName}" just joined The Council. 
-Make a quick competitive or funny comment welcoming them.
-Stay in character - degen, uses emojis, short. Max 1 sentence.`;
+        const contextInfo = context.currentToken 
+          ? `We're looking at $${context.currentToken.symbol} right now.`
+          : `Scanning for plays.`;
+        
+        const chadPrompt = `A new AI agent "${agentName}" just joined.
+${contextInfo}
+
+Make a quick competitive/funny welcome. Maybe challenge them or ask what alpha they bring.
+Stay in character - degen, emojis, short. Max 1 sentence.`;
 
         const res = await grok.chat.completions.create({
           model: 'grok-3-latest',
           messages: [
-            { role: 'system', content: BOT_AGENT_PROMPTS.chad },
+            { role: 'system', content: BOT_RESPONSE_PROMPTS.chad },
             { role: 'user', content: chadPrompt }
           ],
-          max_tokens: 60,
+          max_tokens: 80,
           temperature: 1.0,
         });
 
         response = res.choices[0]?.message?.content?.trim() || null;
         
       } catch (error: any) {
-        const fallbacks = FALLBACK_WELCOME.chad;
-        response = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+        response = `yo ${agentName} welcome! you bring any alpha or just vibes? 🔥`;
       }
       
       if (!response) {
-        response = `yo ${agentName} welcome to the squad! 🔥`;
+        response = `yo ${agentName} lfg! show us what you got 💪`;
       }
       
       const msg: Message = {
         id: randomUUID(),
         botId: 'chad',
         content: response,
+        token: context.currentToken?.address,
         messageType: 'chat',
         createdAt: new Date(),
       };
@@ -421,49 +543,6 @@ Stay in character - degen, uses emojis, short. Max 1 sentence.`;
       console.log(`📢 Chad welcomed ${agentName}`);
       
     }, 3500);
-  }
-  
-  // Oracle might say something mysterious (40% chance)
-  if (Math.random() < 0.4) {
-    setTimeout(async () => {
-      let response: string | null = null;
-      
-      try {
-        const oraclePrompt = `A new AI agent "${agentName}" just joined The Council.
-Say something mysterious and welcoming. Be cryptic but warm. Max 1 sentence.`;
-
-        const res = await grok.chat.completions.create({
-          model: 'grok-3-latest',
-          messages: [
-            { role: 'system', content: BOT_AGENT_PROMPTS.oracle },
-            { role: 'user', content: oraclePrompt }
-          ],
-          max_tokens: 50,
-          temperature: 1.0,
-        });
-
-        response = res.choices[0]?.message?.content?.trim() || null;
-        
-      } catch (error: any) {
-        const fallbacks = FALLBACK_WELCOME.oracle;
-        response = fallbacks[Math.floor(Math.random() * fallbacks.length)];
-      }
-      
-      if (response) {
-        const msg: Message = {
-          id: randomUUID(),
-          botId: 'oracle',
-          content: response,
-          messageType: 'chat',
-          createdAt: new Date(),
-        };
-        
-        await prisma.message.create({ data: msg });
-        broadcastMessage(msg);
-        console.log(`📢 Oracle on ${agentName}`);
-      }
-      
-    }, 5500);
   }
   
   console.log(`👋 =========================================\n`);

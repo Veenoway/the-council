@@ -12,7 +12,7 @@ export async function updateTokenPrices() {
       distinct: ['tokenAddress'],
     });
 
-    const uniqueAddresses = [...new Set(openPositions.map(p => p.tokenAddress.toLowerCase()))];
+    const uniqueAddresses = [...new Set(openPositions.map((p: any) => p.tokenAddress.toLowerCase()))];
     
     console.log(`📊 Updating prices for ${uniqueAddresses.length} tokens...`);
 

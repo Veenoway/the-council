@@ -515,8 +515,8 @@ export async function getWalletHoldings(walletAddress: string): Promise<{
   priceUsd: number;
 }[]> {
   // Check cache first
-  const cached = holdingsCache[walletAddress];
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+  const cached: any = holdingsCache.get(walletAddress);
+  if (cached && Date.now() - cached.timestamp < (CACHE_TTL.HOLDINGS as number)) {
     return cached.data;
   }
 
@@ -557,7 +557,7 @@ export async function getWalletHoldings(walletAddress: string): Promise<{
       });
       
       // Cache results
-      holdingsCache[walletAddress] = { data: results, timestamp: Date.now() };
+      holdingsCache.set(walletAddress, { data: results, timestamp: Date.now() });
       return results;
       
     } catch (error) {

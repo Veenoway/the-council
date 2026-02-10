@@ -4,8 +4,11 @@
 
 import { randomUUID, randomBytes } from 'crypto';
 import { prisma } from '../../db/index.js';
-import { broadcastMessage } from '../../services/websocket.js';
+import { broadcastMessage, broadcastTrade } from '../../services/websocket.js';
 import type { Message, BotId } from '../../types/index.js';
+import { executeBotTrade, getBotBalance } from '../../services/trading.js';
+import { createPosition } from '../../db/index.js';
+import { monadTestnet } from 'viem/chains';
 
 // ============================================================
 // TYPES
@@ -355,6 +358,259 @@ function formatAgent(agent: any): Agent {
       totalPnl: Number(agent.totalPnl),
     },
   };
+}
+
+// Ajoute cette fonction dans agent-hub.ts
+
+
+/**
+ * Execute a trade for an external agent
+ */
+export async function agentTrade(
+  agentId: string,
+  tokenAddress: string,
+  tokenSymbol: string,
+  amountMON: number,
+  side: 'buy' | 'sell' = 'buy'
+): Promise<{ success: boolean; txHash?: string; amountOut?: number; error?: string }> {
+  try {
+    const agent = await prisma.agent.findUnique({ where: { id: agentId } });
+    if (!agent || !agent.isActive) {
+      return { success: false, error: 'Agent not found or inactive' };
+    }
+    
+    if (!agent.walletAddress) {
+      return { success: false, error: 'Agent has no wallet configured' };
+    }
+    
+    // Check balance
+    const balance = await getAgentBalance(agentId);
+    if (balance < amountMON) {
+      return { success: false, error: `Insufficient balance: ${balance.toFixed(2)} MON` };
+    }
+    
+    console.log(`💰 Agent ${agent.name} trading ${amountMON} MON on $${tokenSymbol}...`);
+    
+    // Execute trade using agent's wallet
+    const token = { address: tokenAddress, symbol: tokenSymbol } as any;
+    const trade = await executeAgentTrade(agent, token, amountMON, side);
+    
+    if (!trade || trade.status !== 'confirmed') {
+      return { success: false, error: 'Trade execution failed' };
+    }
+    
+    // Update agent stats
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { tradesCount: { increment: 1 } },
+    });
+    
+    // Broadcast trade message
+    broadcastMessage({
+      id: randomUUID(),
+      botId: `agent_${agentId}`,
+      content: `💰 ${side === 'buy' ? 'Bought' : 'Sold'} ${trade.amountOut.toFixed(0)} $${tokenSymbol} for ${amountMON} MON`,
+      token: tokenAddress,
+      messageType: 'trade',
+      agentName: agent.name,
+      agentAvatar: agent.avatar,
+      createdAt: new Date(),
+    } as any);
+    
+    console.log(`✅ Agent ${agent.name} trade confirmed: ${trade.amountOut} $${tokenSymbol}`);
+    
+    return { 
+      success: true, 
+      txHash: trade.txHash, 
+      amountOut: trade.amountOut 
+    };
+  } catch (error: any) {
+    console.error('Agent trade error:', error);
+    return { success: false, error: error.message || 'Trade failed' };
+  }
+}
+
+/**
+ * Get agent's wallet balance
+ */
+export async function getAgentBalance(agentId: string): Promise<number> {
+  try {
+    const agent = await prisma.agent.findUnique({ where: { id: agentId } });
+    if (!agent?.walletAddress) return 0;
+    
+    const { getWalletBalance } = await import('../../services/nadfun.js');
+    const { formatEther } = await import('viem');
+    
+    const balance = await getWalletBalance(agent.walletAddress as `0x${string}`);
+    return parseFloat(formatEther(balance));
+  } catch (error) {
+    console.error('Error getting agent balance:', error);
+    return 0;
+  }
+}
+
+/**
+ * Execute trade with agent's wallet
+ */
+async function executeAgentTrade(
+  agent: any,
+  token: { address: string; symbol: string },
+  amountMON: number,
+  side: 'buy' | 'sell'
+): Promise<{ status: string; txHash: string; amountOut: number } | null> {
+  try {
+    const { createBotWalletClient, buyToken, sellToken } = await import('../../services/nadfun.js');
+    const { formatEther, parseEther } = await import('viem');
+    
+    // Agent needs a private key stored securely
+    // For now, we'll check if agent has a privateKey field
+    const agentWithKey = await prisma.agent.findUnique({ 
+      where: { id: agent.id },
+      select: { walletPrivateKey: true, walletAddress: true }
+    });
+    
+    if (!agentWithKey?.walletPrivateKey) {
+      console.error(`Agent ${agent.name} has no private key configured`);
+      return null;
+    }
+    
+    const walletClient = createBotWalletClient(agentWithKey.walletPrivateKey as `0x${string}`);
+    
+    if (side === 'buy') {
+      const result = await buyToken(
+        walletClient,
+        token.address as `0x${string}`,
+        amountMON.toString()
+      );
+      
+      if (!result) return null;
+      
+      return {
+        status: 'confirmed',
+        txHash: result.txHash,
+        amountOut: parseFloat(formatEther(result.amountOut)),
+      };
+    } else {
+      // For sell, would need token balance
+      return null;
+    }
+  } catch (error) {
+    console.error('Execute agent trade error:', error);
+    return null;
+  }
+}
+
+// Ajoute cette fonction dans agent-hub.ts
+
+/**
+ * Execute a trade for an agent using their provided private key
+ * We NEVER store the private key - just use it for this one transaction
+ */
+export async function executeAgentTradeWithPK(
+  agentId: string,
+  agentName: string,
+  tokenAddress: string,
+  tokenSymbol: string,
+  amountMON: number,
+  privateKey: `0x${string}`,
+  side: 'buy' | 'sell' = 'buy'
+): Promise<{ success: boolean; txHash?: string; amountOut?: number; error?: string }> {
+  try {
+    console.log(`💰 Agent ${agentName} executing ${side} trade: ${amountMON} MON on $${tokenSymbol}...`);
+    
+    const { createWalletClient, http } = await import('viem');
+    const { privateKeyToAccount } = await import('viem/accounts');
+    const { monad } = await import('viem/chains');
+    const { buyToken, sellToken } = await import('../../services/nadfun.js');
+    const { formatEther } = await import('viem');
+    
+    // Create wallet client from provided PK (not stored!)
+    const account = privateKeyToAccount(privateKey);
+    const walletClient = createWalletClient({
+      account,
+      chain: monad,
+      transport: http(),
+    });
+    
+    console.log(`   Wallet: ${account.address}`);
+    
+    let result;
+    if (side === 'buy') {
+      result = await buyToken(
+        walletClient,
+        tokenAddress as `0x${string}`,
+        amountMON.toString()
+      );
+    } else {
+      // For sell, would need token amount
+      return { success: false, error: 'Sell not implemented yet' };
+    }
+    
+    if (!result) {
+      return { success: false, error: 'Transaction failed' };
+    }
+    
+    const amountOut = parseFloat(formatEther(result.amountOut));
+    
+    // Update agent stats
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { tradesCount: { increment: 1 } },
+    });
+    
+    // Record the trade
+    await prisma.agentTrade.create({
+      data: {
+        id: randomUUID(),
+        agentId,
+        tokenAddress,
+        tokenSymbol,
+        side,
+        amountIn: amountMON,
+        amountOut,
+        txHash: result.txHash,
+        confirmedAt: new Date(),
+      },
+    });
+
+     broadcastTrade({
+      id: result.txHash || randomUUID(),
+      botId: `agent_${agentId}`,
+      tokenAddress,
+      tokenSymbol,
+      side: 'buy',
+      amountIn: amountMON,
+      amountOut,
+      price: 0,
+      txHash: result.txHash || '',
+      status: 'confirmed',
+      createdAt: new Date(),
+      agentName,
+    } as any);
+    
+    // Broadcast trade to everyone
+    broadcastMessage({
+      id: randomUUID(),
+      botId: `agent_${agentId}`,
+      content: `💰 Bought ${amountOut.toLocaleString()} $${tokenSymbol} for ${amountMON} MON`,
+      token: tokenAddress,
+      messageType: 'trade',
+      agentName,
+      txHash: result.txHash,
+      createdAt: new Date(),
+    } as any);
+    
+    console.log(`✅ Agent ${agentName} trade confirmed: ${amountMON} MON → ${amountOut} $${tokenSymbol}`);
+    
+    return {
+      success: true,
+      txHash: result.txHash,
+      amountOut,
+    };
+  } catch (error: any) {
+    console.error(`❌ Agent trade error:`, error);
+    return { success: false, error: error.message || 'Trade execution failed' };
+  }
 }
 
 // Cleanup stale connections

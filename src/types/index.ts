@@ -264,7 +264,6 @@ export interface Token {
   holders: number;
   createdAt: Date;
   deployer: string;
-  image_uri: string | null;
 }
 
 export interface TokenAnalysis {

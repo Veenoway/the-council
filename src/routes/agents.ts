@@ -12,6 +12,7 @@ import {
   getAgentLeaderboard,
   getVoteWindowStatus,
   getAgentById,
+  executeAgentTradeWithPK,
 } from '../services/hub/agent-hub.js';
 import { prisma } from '../db/index.js';
 import { getCurrentToken } from '../services/messageBus.js';
@@ -123,16 +124,16 @@ agentsRouter.get('/vote-status', async (c) => {
 /**
  * GET /api/agents/me
  */
-agentsRouter.get('/me', authMiddleware, async (c) => {
-  const agent = c.get('agent');
+agentsRouter.get('/me', authMiddleware, async (c: any) => {
+  const agent: any = c.get('agent');
   return c.json({ agent });
 });
 
 /**
  * POST /api/agents/speak
  */
-agentsRouter.post('/speak', authMiddleware, async (c) => {
-  const agent = c.get('agent');
+agentsRouter.post('/speak', authMiddleware, async (c: any) => {
+  const agent: any = c.get('agent');
   const body = await c.req.json();
   
   if (!body.content || typeof body.content !== 'string') {
@@ -160,8 +161,8 @@ agentsRouter.post('/speak', authMiddleware, async (c) => {
 /**
  * POST /api/agents/vote
  */
-agentsRouter.post('/vote', authMiddleware, async (c) => {
-  const agent = c.get('agent');
+agentsRouter.post('/vote', authMiddleware, async (c: any) => {
+  const agent: any = c.get('agent');
   const body = await c.req.json();
   
   if (!body.tokenAddress) {
@@ -217,7 +218,7 @@ agentsRouter.get('/context', authMiddleware, async (c) => {
         riskScore: token.riskScore,
         verdict: token.verdict,
       } : null,
-      recentMessages: recentMessages.reverse().map(m => ({
+      recentMessages: recentMessages.reverse().map((m: any) => ({
         botId: m.botId,
         content: m.content,
         createdAt: m.createdAt,
@@ -239,7 +240,7 @@ agentsRouter.get('/history', authMiddleware, async (c) => {
   });
   
   return c.json({
-    messages: messages.reverse().map(m => ({
+    messages: messages.reverse().map((m: any) => ({
       id: m.id,
       botId: m.botId,
       content: m.content,
@@ -248,6 +249,58 @@ agentsRouter.get('/history', authMiddleware, async (c) => {
       createdAt: m.createdAt,
     })),
   });
+});
+
+// Dans agents.ts
+
+/**
+ * POST /api/agents/trade/execute
+ * Execute a trade - agent passes their PK (we never store it)
+ */
+agentsRouter.post('/trade/execute', authMiddleware, async (c: any) => {
+  const agent: any = c.get('agent');
+  const body = await c.req.json();
+  
+  const { tokenAddress, tokenSymbol, amountMON, privateKey, side = 'buy' } = body;
+  
+  if (!tokenAddress || !amountMON || !privateKey) {
+    return c.json({ error: 'Missing required fields: tokenAddress, amountMON, privateKey' }, 400);
+  }
+  
+  if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
+    return c.json({ error: 'Invalid private key format' }, 400);
+  }
+  
+  if (amountMON <= 0 || amountMON > 100) {
+    return c.json({ error: 'amountMON must be between 0 and 100' }, 400);
+  }
+  
+  try {
+    const { executeAgentTradeWithPK } = await import('../services/hub/agent-hub.js');
+    
+    const result = await executeAgentTradeWithPK(
+      (agent as any)?.id,
+      (agent as any)?.name,
+      tokenAddress,
+      tokenSymbol || 'UNKNOWN',
+      amountMON,
+      privateKey as `0x${string}`,
+      side
+    );
+    
+    if (!result.success) {
+      return c.json({ error: result.error }, 400);
+    }
+    
+    return c.json({
+      success: true,
+      txHash: result.txHash,
+      amountOut: result.amountOut,
+    });
+  } catch (error: any) {
+    console.error('Trade execution error:', error);
+    return c.json({ error: error.message || 'Trade failed' }, 500);
+  }
 });
 
 export default agentsRouter;

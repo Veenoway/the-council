@@ -123,6 +123,7 @@ export function broadcastMessage(message: Message): void {
 }
 
 export function broadcastTrade(trade: Trade): void {
+    console.log("broadcastTrade", trade);
   broadcast({
     type: 'trade',
     data: trade,

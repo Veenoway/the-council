@@ -274,7 +274,7 @@ app.get('/api/positions', async (c) => {
     });
     
     // Récupère les prix ET images depuis la DB
-    const tokenAddresses = [...new Set(positions.map(p => p.tokenAddress))];
+    const tokenAddresses = [...new Set(positions.map((p: any) => p.tokenAddress))];
     console.log("tokenAddresses =====>", tokenAddresses);
     const tokens = await prisma.token.findMany({
       where: { address: { in: tokenAddresses } },
@@ -283,7 +283,7 @@ app.get('/api/positions', async (c) => {
     console.log("tokens =====>", tokens);
     
     const tokenMap: Record<string, { price: number; image: string | null }> = {};
-    tokens.forEach(t => {
+    tokens.forEach((t: any) => {
       tokenMap[t.address.toLowerCase()] = {
         price: t.price || 0,
         image: t.image || null,
@@ -323,15 +323,15 @@ app.get('/api/positions', async (c) => {
 
     const portfolios = await Promise.all(ALL_BOT_IDS.map(async (botId) => {
       const config = getBotConfig(botId);
-      const botPositions = enrichedPositions.filter(p => p.botId === botId);
+      const botPositions = enrichedPositions.filter((p: any) => p.botId === botId);
       
-      const totalInvested = botPositions.reduce((sum, p) => sum + p.entryValueMON, 0);
-      const totalPnlMON = botPositions.reduce((sum, p) => sum + p.pnlMON, 0);
+      const totalInvested = botPositions.reduce((sum: any, p: any) => sum + p.entryValueMON, 0);
+      const totalPnlMON = botPositions.reduce((sum: any, p: any) => sum + p.pnlMON, 0);
       const totalCurrentValue = totalInvested + totalPnlMON;
       const totalPnlPercent = totalInvested > 0 ? (totalPnlMON / totalInvested) * 100 : 0;
       
-      const wins = botPositions.filter(p => p.pnlMON > 0).length;
-      const losses = botPositions.filter(p => p.pnlMON < 0).length;
+      const wins = botPositions.filter((p: any) => p.pnlMON > 0).length;
+      const losses = botPositions.filter((p: any) => p.pnlMON < 0).length;
       
       let balance = 0;
       try {

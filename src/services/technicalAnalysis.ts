@@ -1,7 +1,7 @@
 // ============================================================
 // TECHNICAL ANALYSIS — With cache to avoid rate limiting
 // ============================================================
-
+import { detectAllPatterns } from './patternRecognistion.js';
 const API_URL = process.env.NAD_API_URL || 'https://api.nadapp.net';
 const API_KEY = process.env.NAD_API_KEY || '';
 const headers: Record<string, string> = API_KEY ? { 'X-API-Key': API_KEY } : {};
@@ -311,12 +311,17 @@ function analyzeOrderFlow(swaps: any[]): { whaleActivity: 'buying' | 'selling' |
 // ============================================================
 // MAIN ANALYSIS
 // ============================================================
+// ============================================================
+// TECHNICAL ANALYSIS — With patterns integration
+// ============================================================
+
+
+
 
 export async function analyzeTechnicals(tokenAddress: string): Promise<TechnicalIndicators | null> {
   try {
     console.log(`📊 Running TA for ${tokenAddress.slice(0, 10)}...`);
     
-    // Sequential fetches to avoid rate limiting
     const candles = await fetchOHLCV(tokenAddress, '5', 100);
     
     if (candles.length < 15) {
@@ -372,12 +377,36 @@ export async function analyzeTechnicals(tokenAddress: string): Promise<Technical
     // === Order Flow ===
     const { whaleActivity } = analyzeOrderFlow(swaps);
     
+    // === PATTERN RECOGNITION ===
+    console.log(`   🔍 Detecting chart patterns...`);
+    const patternAnalysis = detectAllPatterns(candles);
+    const patterns: PatternResult[] = patternAnalysis.patterns.map(p => ({
+      name: p.name,
+      type: p.type,
+      direction: p.direction,
+      confidence: p.confidence,
+      description: p.description,
+    }));
+    
+    const channel: ChannelResult = {
+      type: patternAnalysis.channel.type,
+      breakout: patternAnalysis.channel.breakout,
+      upper: patternAnalysis.channel.upperLine?.intercept || 0,
+      lower: patternAnalysis.channel.lowerLine?.intercept || 0,
+    };
+    const patternSummary = patternAnalysis.summary;
+    const patternSignal = patternAnalysis.dominantSignal;
+    
+    if (patterns.length > 0) {
+      console.log(`   📈 Patterns found: ${patterns.map(p => p.name).join(', ')}`);
+    }
+    
     // === Trend ===
     const recentCloses = closes.slice(-10);
     const olderCloses = closes.slice(-20, -10);
     const recentAvg = recentCloses.reduce((a, b) => a + b, 0) / recentCloses.length;
     const olderAvg = olderCloses.length > 0 ? olderCloses.reduce((a, b) => a + b, 0) / olderCloses.length : recentAvg;
-    const trendChange = ((recentAvg - olderAvg) / olderAvg) * 100;
+    const trendChange = olderAvg !== 0 ? ((recentAvg - olderAvg) / olderAvg) * 100 : 0;
     
     let trend: 'strong_uptrend' | 'uptrend' | 'sideways' | 'downtrend' | 'strong_downtrend';
     let trendStrength: number;
@@ -388,9 +417,11 @@ export async function analyzeTechnicals(tokenAddress: string): Promise<Technical
     else if (priceVsMa === 'below_all' && trendChange < -3) { trend = 'downtrend'; trendStrength = 60; }
     else { trend = 'sideways'; trendStrength = 40; }
     
-    // === Momentum ===
-    const momentumScore = (rsi > 50 ? 1 : -1) + (maSignal === 'bullish' ? 1 : maSignal === 'bearish' ? -1 : 0) +
-      (whaleActivity === 'buying' ? 1 : whaleActivity === 'selling' ? -1 : 0);
+    // === Momentum (including patterns) ===
+    const momentumScore = (rsi > 50 ? 1 : -1) + 
+      (maSignal === 'bullish' ? 1 : maSignal === 'bearish' ? -1 : 0) +
+      (whaleActivity === 'buying' ? 1 : whaleActivity === 'selling' ? -1 : 0) +
+      (patternSignal === 'bullish' ? 1 : patternSignal === 'bearish' ? -1 : 0);
     
     const momentum: 'strong_bullish' | 'bullish' | 'neutral' | 'bearish' | 'strong_bearish' =
       momentumScore >= 3 ? 'strong_bullish' : momentumScore >= 1 ? 'bullish' :
@@ -401,20 +432,53 @@ export async function analyzeTechnicals(tokenAddress: string): Promise<Technical
     const m60 = metrics.find((m: any) => m.timeframe === '60');
     const m1440 = metrics.find((m: any) => m.timeframe === '1440');
     
-    // === Build factors ===
+    // === Build factors (including patterns) ===
     const bullishFactors: string[] = [];
     const bearishFactors: string[] = [];
     
+    // RSI
     if (rsiSignal === 'oversold') bullishFactors.push(`RSI ${rsi.toFixed(0)} oversold`);
     if (rsiSignal === 'overbought') bearishFactors.push(`RSI ${rsi.toFixed(0)} overbought`);
-    if (maCrossover === 'golden_cross') bullishFactors.push('Golden cross');
-    if (maCrossover === 'death_cross') bearishFactors.push('Death cross');
+    
+    // MA
+    if (maCrossover === 'golden_cross') bullishFactors.push('Golden cross forming');
+    if (maCrossover === 'death_cross') bearishFactors.push('Death cross forming');
+    if (priceVsMa === 'above_all') bullishFactors.push('Price above all MAs');
+    if (priceVsMa === 'below_all') bearishFactors.push('Price below all MAs');
+    
+    // Volume
     if (volumeSpike && (m60?.percent || 0) > 0) bullishFactors.push(`Volume spike ${volumeRatio.toFixed(1)}x`);
     if (volumeSpike && (m60?.percent || 0) < 0) bearishFactors.push('Volume spike on dump');
-    if (obvTrend === 'accumulation') bullishFactors.push('OBV accumulation');
-    if (obvTrend === 'distribution') bearishFactors.push('OBV distribution');
-    if (whaleActivity === 'buying') bullishFactors.push('Whales buying');
-    if (whaleActivity === 'selling') bearishFactors.push('Whales selling');
+    if (volumeTrend === 'increasing') bullishFactors.push('Volume increasing');
+    if (volumeTrend === 'decreasing') bearishFactors.push('Volume fading');
+    
+    // OBV
+    if (obvTrend === 'accumulation') bullishFactors.push('OBV shows accumulation');
+    if (obvTrend === 'distribution') bearishFactors.push('OBV shows distribution');
+    
+    // Whales
+    if (whaleActivity === 'buying') bullishFactors.push('Whales accumulating');
+    if (whaleActivity === 'selling') bearishFactors.push('Whales distributing');
+    
+    // PATTERNS - Add significant ones to factors
+    for (const pattern of patterns) {
+      if (pattern.confidence >= 60) {
+        const patternStr = `${pattern.name} (${pattern.confidence}%)`;
+        if (pattern.direction === 'bullish') {
+          bullishFactors.push(patternStr);
+        } else if (pattern.direction === 'bearish') {
+          bearishFactors.push(patternStr);
+        }
+      }
+    }
+    
+    // Channel
+    if (channel.type !== 'none') {
+      if (channel.breakout === 'above') bullishFactors.push(`${channel.type} channel breakout`);
+      else if (channel.breakout === 'below') bearishFactors.push(`${channel.type} channel breakdown`);
+      else if (channel.type === 'ascending') bullishFactors.push('Ascending channel');
+      else if (channel.type === 'descending') bearishFactors.push('Descending channel');
+    }
     
     // === Final signal ===
     const netScore = bullishFactors.length - bearishFactors.length;
@@ -427,9 +491,12 @@ export async function analyzeTechnicals(tokenAddress: string): Promise<Technical
     else if (netScore <= -2) { signal = 'sell'; confidence = Math.min(75, 50 + Math.abs(netScore) * 4); }
     else { signal = 'hold'; confidence = 40; }
     
-    // === Key insight ===
+    // === Key insight (prioritize strong patterns) ===
     let keyInsight = '';
-    if (netScore > 0 && bullishFactors[0]) {
+    const strongPattern = patterns.find(p => p.confidence >= 70);
+    if (strongPattern) {
+      keyInsight = `${strongPattern.name}: ${strongPattern.description}`;
+    } else if (netScore > 0 && bullishFactors[0]) {
       keyInsight = bullishFactors[0];
     } else if (netScore < 0 && bearishFactors[0]) {
       keyInsight = bearishFactors[0];
@@ -437,7 +504,7 @@ export async function analyzeTechnicals(tokenAddress: string): Promise<Technical
       keyInsight = 'Mixed signals - wait for confirmation';
     }
     
-    console.log(`   TA complete: ${signal} (${confidence}%), RSI ${rsi.toFixed(0)}`);
+    console.log(`   TA complete: ${signal} (${confidence}%), RSI ${rsi.toFixed(0)}, Patterns: ${patterns.length}`);
     
     return {
       price: currentPrice,
@@ -453,10 +520,10 @@ export async function analyzeTechnicals(tokenAddress: string): Promise<Technical
       
       trend, trendStrength, momentum,
       
-      patterns: [],
-      channel: { type: 'none', breakout: 'none', upper: 0, lower: 0 },
-      patternSummary: 'No patterns detected',
-      patternSignal: 'neutral',
+      patterns,
+      channel,
+      patternSummary,
+      patternSignal,
       
       signal, confidence,
       bullishFactors, bearishFactors, keyInsight,
