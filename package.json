@@ -2,16 +2,12 @@
   "name": "council-backend",
   "version": "1.0.0",
   "type": "module",
-  "scripts": {
+ "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "db:generate": "prisma generate",
-    "db:push": "prisma db push",
-    "db:migrate": "prisma migrate dev",
-    "db:seed": "tsx prisma/seed.ts",
-    "db:studio": "prisma studio",
-    "db:reset": "prisma migrate reset"
+    "db:push": "prisma db push"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.9",

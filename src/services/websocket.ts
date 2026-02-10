@@ -3,13 +3,56 @@
 // ============================================================
 
 import { WebSocketServer, WebSocket } from 'ws';
+import type { Server } from 'http';
 import type { Message, Trade, Token, BotStats, WSEvent, WSEventType } from '../types/index.js';
 
 let wss: WebSocketServer | null = null;
 const clients: Set<WebSocket> = new Set();
 
 // ============================================================
-// INIT
+// INIT WITH EXISTING HTTP SERVER (for Railway - single port)
+// ============================================================
+
+export function initWebSocketWithServer(server: Server): WebSocketServer {
+  wss = new WebSocketServer({ server });
+
+  wss.on('connection', (ws, req) => {
+    console.log('🔌 Client connected from:', req.socket.remoteAddress);
+    clients.add(ws);
+
+    ws.on('message', (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        handleClientMessage(ws, message);
+      } catch (e) {
+        console.error('Invalid message from client:', e);
+      }
+    });
+
+    ws.on('close', () => {
+      console.log('🔌 Client disconnected');
+      clients.delete(ws);
+    });
+
+    ws.on('error', (error) => {
+      console.error('WebSocket error:', error);
+      clients.delete(ws);
+    });
+
+    // Send initial state
+    sendToClient(ws, {
+      type: 'connected',
+      data: { message: 'Connected to The Council' },
+      timestamp: new Date(),
+    });
+  });
+
+  console.log(`🔌 WebSocket server attached to HTTP server`);
+  return wss;
+}
+
+// ============================================================
+// INIT STANDALONE (for local dev with separate port)
 // ============================================================
 
 export function initWebSocket(port: number = 8080): WebSocketServer {
@@ -80,7 +123,7 @@ const clientHandlers: Record<string, ClientMessageHandler> = {
 };
 
 function handleClientMessage(ws: WebSocket, message: { type: string; data: any }) {
-  console.log('📨 Received message:', message.type, message.data); // AJOUTE ÇA
+  console.log('📨 Received message:', message.type, message.data);
   
   const handler = clientHandlers[message.type];
   if (handler) {
@@ -123,7 +166,7 @@ export function broadcastMessage(message: Message): void {
 }
 
 export function broadcastTrade(trade: Trade): void {
-    console.log("broadcastTrade", trade);
+  console.log("📡 broadcastTrade:", trade.botId, trade.side, trade.amountOut, trade.tokenSymbol);
   broadcast({
     type: 'trade',
     data: trade,

@@ -3,12 +3,12 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { initDatabase, closeDatabase, prisma } from './db/index.js';
-import { initWebSocket, closeWebSocket } from './services/websocket.js';
+import { initWebSocketWithServer, closeWebSocket } from './services/websocket.js';
 import { startOrchestrator } from './services/orchestrator.js';
 import { getCurrentToken, getRecentMessages } from './services/messageBus.js';
 import { getWalletBalance, getWalletHoldings } from './services/nadfun.js';
-import { getBotConfig, ALL_BOT_IDS,  } from './bots/personalities.js';
-import { getBotBalance, getBotWallet,  } from './services/trading.js';
+import { getBotConfig, ALL_BOT_IDS } from './bots/personalities.js';
+import { getBotBalance, getBotWallet } from './services/trading.js';
 import { startPredictionsResolver } from './jobs/prediction-resolver.js';
 import { getRecentMessages as getRecentMessagesFromDB } from './db/index.js';
 import { startPriceUpdater } from './jobs/price-updater.js';
@@ -16,11 +16,11 @@ import { startImageUpdater } from './jobs/image-updater.js';
 import agentsRouter from './routes/agents.js';
 
 // ============================================================
-// CONFIG
+// CONFIG — Railway uses PORT env var
 // ============================================================
 
-const HTTP_PORT = parseInt(process.env.HTTP_PORT || '3005');
-const WS_PORT = parseInt(process.env.WS_PORT || '8080');
+const PORT = parseInt(process.env.PORT || process.env.HTTP_PORT || '3005');
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 // ============================================================
 // HONO APP
@@ -28,13 +28,21 @@ const WS_PORT = parseInt(process.env.WS_PORT || '8080');
 
 const app = new Hono();
 
-app.use('/*', cors({ origin: '*', allowMethods: ['GET', 'POST', 'PUT', 'DELETE'] }));
+app.use('/*', cors({ 
+  origin: process.env.CORS_ORIGIN || '*', 
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE'],
+  credentials: true,
+}));
 
 // ============================================================
 // HEALTH CHECK
 // ============================================================
 
-app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString() }));
+app.get('/health', (c) => c.json({ 
+  status: 'ok', 
+  timestamp: new Date().toISOString(),
+  version: '1.0.0',
+}));
 
 // ============================================================
 // CURRENT STATE
@@ -42,37 +50,28 @@ app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOStri
 
 app.get('/api/current-token', async (c) => {
   const token = getCurrentToken();
-  
-  // Get messages from memory first (live), fallback to DB
   let messages = getRecentMessages(50);
-  
-  // If no messages in memory, fetch from DB (for SSR on cold start)
   if (!messages || messages.length === 0) {
     messages = await getRecentMessagesFromDB(10);
   }
-  
   return c.json({ token: token || null, messages: messages || [], timestamp: new Date().toISOString() });
 });
 
 // ============================================================
-// TRADES — Recent trades (no live price fetching to avoid rate limits)
+// TRADES
 // ============================================================
 
 app.get('/api/trades', async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '50');
-    
     const positions = await prisma.position.findMany({
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
 
-    // Don't fetch live prices here - use entry price for closed, 
-    // frontend can fetch live prices separately if needed
-    const trades = positions.map((p:any) => {
+    const trades = positions.map((p: any) => {
       const entryValue = Number(p.entryValueMon) || 0;
       const config = getBotConfig(p.botId as any) as any;
-
       return {
         id: p.id,
         botId: p.botId,
@@ -112,7 +111,7 @@ app.get('/api/trades/live', async (c) => {
     });
 
     const trades = positions.map((p: any) => {
-        const config = getBotConfig(p.botId as any) as any;
+      const config = getBotConfig(p.botId as any) as any;
       return {
         id: p.id,
         botId: p.botId,
@@ -136,13 +135,12 @@ app.get('/api/trades/live', async (c) => {
 });
 
 // ============================================================
-// TOKENS — Analyzed tokens history
+// TOKENS
 // ============================================================
 
 app.get('/api/tokens', async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '50');
-
     const tokens = await prisma.token.findMany({
       orderBy: { updatedAt: 'desc' },
       take: limit,
@@ -158,7 +156,6 @@ app.get('/api/tokens', async (c) => {
       holders: t.holders,
       verdict: t.verdict,
       riskScore: t.riskScore,
-      // analysis contient riskFlags et opinions
       riskFlags: (t.analysis as any)?.flags || null,
       opinions: (t.analysis as any)?.opinions || null,
       analyzedAt: t.updatedAt,
@@ -212,7 +209,6 @@ app.get('/api/tokens/analysis/:address', async (c) => {
   try {
     const address = c.req.param('address');
     const token = await prisma.token.findUnique({ where: { address } });
-
     if (!token) return c.json({ error: 'Token not found' }, 404);
 
     const positions = await prisma.position.findMany({
@@ -260,9 +256,8 @@ app.get('/api/tokens/analysis/:address', async (c) => {
 });
 
 // ============================================================
-// POSITIONS — No live price fetching to avoid rate limits
+// POSITIONS
 // ============================================================
-
 
 app.get('/api/positions', async (c) => {
   try {
@@ -273,14 +268,11 @@ app.get('/api/positions', async (c) => {
       orderBy: { createdAt: 'desc' },
     });
     
-    // Récupère les prix ET images depuis la DB
     const tokenAddresses = [...new Set(positions.map((p: any) => p.tokenAddress))];
-    console.log("tokenAddresses =====>", tokenAddresses);
     const tokens = await prisma.token.findMany({
       where: { address: { in: tokenAddresses } },
       select: { address: true, price: true, image: true },
     });
-    console.log("tokens =====>", tokens);
     
     const tokenMap: Record<string, { price: number; image: string | null }> = {};
     tokens.forEach((t: any) => {
@@ -319,8 +311,6 @@ app.get('/api/positions', async (c) => {
       };
     });
 
-    console.log("enrichedPositions =====>", enrichedPositions[0]);
-
     const portfolios = await Promise.all(ALL_BOT_IDS.map(async (botId) => {
       const config = getBotConfig(botId);
       const botPositions = enrichedPositions.filter((p: any) => p.botId === botId);
@@ -334,11 +324,7 @@ app.get('/api/positions', async (c) => {
       const losses = botPositions.filter((p: any) => p.pnlMON < 0).length;
       
       let balance = 0;
-      try {
-        balance = await getBotBalance(botId);
-      } catch (e) {
-        console.error(`Error fetching balance for ${botId}:`, e);
-      }
+      try { balance = await getBotBalance(botId); } catch (e) {}
       
       return {
         botId,
@@ -369,25 +355,21 @@ app.get('/api/positions', async (c) => {
 
 app.get('/api/bots', async (c) => {
   try {
-    // Get closed positions from DB for win/loss stats
     const allPositions = await prisma.position.findMany();
-    const closedPositions = allPositions.filter((p:any) => !p.isOpen);
+    const closedPositions = allPositions.filter((p: any) => !p.isOpen);
 
     const bots = await Promise.all(ALL_BOT_IDS.map(async (botId) => {
       const config = getBotConfig(botId) as any;
       const walletAddress = getBotWallet(botId);
       
-      // Get bot's closed positions for stats
-      const botClosedPositions = closedPositions.filter((p:any)  => p.botId === botId);
-      const realizedPnl = botClosedPositions.reduce((sum:any, p:any) => sum + (p.pnl ? Number(p.pnl) : 0), 0);
-      const wins = botClosedPositions.filter((p:any) => p.pnl && Number(p.pnl) > 0).length;
-      const losses = botClosedPositions.filter((p:any) => p.pnl && Number(p.pnl) <= 0).length;
+      const botClosedPositions = closedPositions.filter((p: any) => p.botId === botId);
+      const realizedPnl = botClosedPositions.reduce((sum: any, p: any) => sum + (p.pnl ? Number(p.pnl) : 0), 0);
+      const wins = botClosedPositions.filter((p: any) => p.pnl && Number(p.pnl) > 0).length;
+      const losses = botClosedPositions.filter((p: any) => p.pnl && Number(p.pnl) <= 0).length;
 
-      // Get balance
       let balance = 0;
       try { balance = await getBotBalance(botId); } catch (e) {}
 
-      // Get holdings from API (more reliable than calculating from DB)
       let holdingsValue = 0;
       let openPositions = 0;
       
@@ -396,9 +378,7 @@ app.get('/api/bots', async (c) => {
           const holdings = await getWalletHoldings(walletAddress);
           holdingsValue = holdings.reduce((sum, h) => sum + h.valueMon, 0);
           openPositions = holdings.length;
-        } catch (e) {
-          console.error(`Error fetching holdings for ${botId}:`, e);
-        }
+        } catch (e) {}
       }
 
       return {
@@ -413,7 +393,7 @@ app.get('/api/bots', async (c) => {
         losses,
         winRate: botClosedPositions.length > 0 ? Math.round((wins / botClosedPositions.length) * 100) : 0,
         realizedPnl: Math.round(realizedPnl * 1000) / 1000,
-        unrealizedPnl: 0, // TODO: calculate from holdings vs entry
+        unrealizedPnl: 0,
         totalPnl: Math.round(realizedPnl * 1000) / 1000,
         balance: Math.round(balance * 1000) / 1000,
         holdingsValue: Math.round(holdingsValue * 1000) / 1000,
@@ -429,8 +409,6 @@ app.get('/api/bots', async (c) => {
   }
 });
 
-
-
 app.get('/api/bots/:botId', async (c) => {
   try {
     const botId = c.req.param('botId') as any;
@@ -439,20 +417,17 @@ app.get('/api/bots/:botId', async (c) => {
 
     const walletAddress = getBotWallet(botId) as string;
     
-    // Get closed positions from DB for stats
     const closedPositions = await prisma.position.findMany({ 
       where: { botId, isOpen: false }, 
       orderBy: { createdAt: 'desc' } 
     });
     
-    const realizedPnl = closedPositions.reduce((s:any, p:any) => s + (p.pnl ? Number(p.pnl) : 0), 0);
-    const wins = closedPositions.filter((p:any) => p.pnl && Number(p.pnl) > 0).length;
+    const realizedPnl = closedPositions.reduce((s: any, p: any) => s + (p.pnl ? Number(p.pnl) : 0), 0);
+    const wins = closedPositions.filter((p: any) => p.pnl && Number(p.pnl) > 0).length;
 
-    // Get balance
     let balance = 0;
     try { balance = await getBotBalance(botId); } catch (e) {}
 
-    // Get holdings from API (more reliable)
     let holdings: any[] = [];
     let totalCurrentValue = 0;
     
@@ -467,9 +442,7 @@ app.get('/api/bots/:botId', async (c) => {
           priceUsd: h.priceUsd,
         }));
         totalCurrentValue = apiHoldings.reduce((sum, h) => sum + h.valueMon, 0);
-      } catch (e) {
-        console.error(`Error fetching holdings for ${botId}:`, e);
-      }
+      } catch (e) {}
     }
 
     return c.json({
@@ -510,13 +483,13 @@ app.get('/api/bots/:botId', async (c) => {
 app.get('/api/stats', async (c) => {
   try {
     const allPositions = await prisma.position.findMany();
-    const closedPositions = allPositions.filter((p:any) => !p.isOpen);
-    const totalPnl = closedPositions.reduce((s:any, p:any) => s + (p.pnl ? Number(p.pnl) : 0), 0);
-    const wins = closedPositions.filter((p:any) => p.pnl && Number(p.pnl) > 0).length;
+    const closedPositions = allPositions.filter((p: any) => !p.isOpen);
+    const totalPnl = closedPositions.reduce((s: any, p: any) => s + (p.pnl ? Number(p.pnl) : 0), 0);
+    const wins = closedPositions.filter((p: any) => p.pnl && Number(p.pnl) > 0).length;
 
     return c.json({
       totalTrades: allPositions.length,
-      openPositions: allPositions.filter((p:any) => p.isOpen).length,
+      openPositions: allPositions.filter((p: any) => p.isOpen).length,
       closedTrades: closedPositions.length,
       totalPnl: Math.round(totalPnl * 1000) / 1000,
       wins,
@@ -531,10 +504,9 @@ app.get('/api/stats', async (c) => {
 });
 
 // ============================================================
-// TOKEN ANALYSIS REQUEST — For Council holders
+// TOKEN ANALYSIS REQUEST
 // ============================================================
 
-// Council token address (replace with actual)
 const COUNCIL_TOKEN_ADDRESS = process.env.COUNCIL_TOKEN_ADDRESS || '0x0000000000000000000000000000000000000000';
 
 app.post('/api/analyze/request', async (c) => {
@@ -542,30 +514,14 @@ app.post('/api/analyze/request', async (c) => {
     const body = await c.req.json();
     const { tokenAddress, requestedBy, symbol, name } = body;
 
-    if (!tokenAddress) {
-      return c.json({ error: 'Token address required' }, 400);
-    }
+    if (!tokenAddress) return c.json({ error: 'Token address required' }, 400);
+    if (!tokenAddress.match(/^0x[a-fA-F0-9]{40}$/)) return c.json({ error: 'Invalid token address format' }, 400);
 
-    // Validate token address format
-    if (!tokenAddress.match(/^0x[a-fA-F0-9]{40}$/)) {
-      return c.json({ error: 'Invalid token address format' }, 400);
-    }
-
-    // TODO: Verify user holds Council token
-    // For now, we'll trust the frontend validation
-    // In production, check on-chain balance
-
-    // Import the function to queue token for analysis
     const { queueTokenForAnalysis, getIsAnalyzing } = await import('./services/orchestrator.js');
-
-    // Queue the token with symbol/name from frontend
     const success = await queueTokenForAnalysis(tokenAddress, requestedBy, { symbol, name });
 
-    if (!success) {
-      return c.json({ error: 'Failed to queue token for analysis' }, 500);
-    }
+    if (!success) return c.json({ error: 'Failed to queue token for analysis' }, 500);
 
-    // Log the request
     const wasAnalyzing = getIsAnalyzing();
     console.log(`👑 Analysis requested by ${requestedBy} for $${symbol || tokenAddress}${wasAnalyzing ? ' (INTERRUPTING)' : ''}`);
 
@@ -584,15 +540,11 @@ app.post('/api/analyze/request', async (c) => {
   }
 });
 
-// Check if user holds Council token
 app.get('/api/holder/check/:address', async (c) => {
   try {
     const address = c.req.param('address');
-    
-    // TODO: Check on-chain if user holds Council token
-    // For now, return true for testing
-    const isHolder = true; // Replace with actual check
-    const balance = 1000; // Replace with actual balance
+    const isHolder = true;
+    const balance = 1000;
 
     return c.json({
       address,
@@ -606,9 +558,15 @@ app.get('/api/holder/check/:address', async (c) => {
     return c.json({ error: 'Failed to check holder status' }, 500);
   }
 });
-app.route('/api/agents', agentsRouter);
+
 // ============================================================
-// USER TRADE NOTIFICATION — Bots react when users buy
+// AGENTS ROUTER
+// ============================================================
+
+app.route('/api/agents', agentsRouter);
+
+// ============================================================
+// USER TRADE NOTIFICATION
 // ============================================================
 
 app.post('/api/trade/notify', async (c) => {
@@ -620,10 +578,8 @@ app.post('/api/trade/notify', async (c) => {
       return c.json({ error: 'Missing required fields' }, 400);
     }
 
-    // Import the handler
     const { handleUserTrade } = await import('./services/orchestrator.js');
 
-    // Trigger bot reactions
     await handleUserTrade({
       userAddress,
       tokenAddress,
@@ -647,7 +603,7 @@ app.post('/api/trade/notify', async (c) => {
 });
 
 // ============================================================
-// MAIN
+// MAIN — Combined HTTP + WebSocket on same port for Railway
 // ============================================================
 
 async function main(): Promise<void> {
@@ -660,21 +616,47 @@ async function main(): Promise<void> {
 
   const requiredEnvVars = ['XAI_API_KEY'];
   const missing = requiredEnvVars.filter(v => !process.env[v]);
-  if (missing.length > 0) { console.error('❌ Missing:', missing.join(', ')); process.exit(1); }
+  if (missing.length > 0) { 
+    console.error('❌ Missing:', missing.join(', ')); 
+    process.exit(1); 
+  }
 
   try {
     console.log('📦 Initializing database...');
     await initDatabase();
 
-    console.log(`🌐 Starting HTTP server on port ${HTTP_PORT}...`);
-    serve({ fetch: app.fetch, port: HTTP_PORT });
-    console.log(`✅ HTTP API running at http://localhost:${HTTP_PORT}`);
+    console.log(`🚀 Starting server on port ${PORT}...`);
+    
+    // Start HTTP server and get the underlying Node.js server
+    const server = serve({ 
+      fetch: app.fetch, 
+      port: PORT,
+    }, (info) => {
+      console.log(`✅ HTTP API running on port ${info.port}`);
+    });
 
-    console.log(`🔌 Starting WebSocket server on port ${WS_PORT}...`);
-    initWebSocket(WS_PORT);
+    // Attach WebSocket to the SAME server (required for Railway)
+    console.log(`🔌 Attaching WebSocket to HTTP server...`);
+    initWebSocketWithServer(server as any);
+    
+    console.log(`✅ Server ready:`);
+    console.log(`   HTTP: http://localhost:${PORT}`);
+    console.log(`   WS:   ws://localhost:${PORT}`);
+    
+    if (IS_PRODUCTION) {
+      console.log(`   Mode: PRODUCTION`);
+    }
 
+    // Start background jobs
+    console.log('⏰ Starting background jobs...');
+    startPriceUpdater();
+    startImageUpdater();
+    startPredictionsResolver();
+
+    // Start orchestrator
     console.log('🤖 Starting bot orchestrator...');
     await startOrchestrator();
+    
   } catch (error) {
     console.error('❌ Fatal error:', error);
     await shutdown();
@@ -691,7 +673,5 @@ async function shutdown(): Promise<void> {
 
 process.on('SIGINT', async () => { await shutdown(); process.exit(0); });
 process.on('SIGTERM', async () => { await shutdown(); process.exit(0); });
-startPriceUpdater();
-startImageUpdater();
-startPredictionsResolver();
+
 main().catch(console.error);
