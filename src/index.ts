@@ -6,7 +6,7 @@ import { initDatabase, closeDatabase, prisma } from './db/index.js';
 import { initWebSocketWithServer, closeWebSocket } from './services/websocket.js';
 import { startOrchestrator } from './services/orchestrator.js';
 import { getCurrentToken, getRecentMessages } from './services/messageBus.js';
-import { getWalletBalance, getWalletHoldings } from './services/nadfun.js';
+import { getTokenByAddress, getWalletBalance, getWalletHoldings } from './services/nadfun.js';
 import { getBotConfig, ALL_BOT_IDS } from './bots/personalities.js';
 import { getBotBalance, getBotWallet } from './services/trading.js';
 import { startPredictionsResolver } from './jobs/prediction-resolver.js';
@@ -19,7 +19,7 @@ import agentsRouter from './routes/agents.js';
 // CONFIG — Railway uses PORT env var
 // ============================================================
 
-const PORT = parseInt(process.env.PORT || process.env.HTTP_PORT || '3005');
+const PORT = parseInt(process.env.PORT || '3005', 10);
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 // ============================================================
@@ -516,6 +516,12 @@ app.post('/api/analyze/request', async (c) => {
 
     if (!tokenAddress) return c.json({ error: 'Token address required' }, 400);
     if (!tokenAddress.match(/^0x[a-fA-F0-9]{40}$/)) return c.json({ error: 'Invalid token address format' }, 400);
+
+    const token = await getTokenByAddress(tokenAddress);
+    
+    if (!token) {
+      return c.json({ error: 'Could not fetch token data from Nadfun' }, 404);
+    }
 
     const { queueTokenForAnalysis, getIsAnalyzing } = await import('./services/orchestrator.js');
     const success = await queueTokenForAnalysis(tokenAddress, requestedBy, { symbol, name });
