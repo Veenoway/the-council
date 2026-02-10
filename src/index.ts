@@ -6,11 +6,13 @@ import { initDatabase, closeDatabase, prisma } from './db/index.js';
 import { initWebSocket, closeWebSocket } from './services/websocket.js';
 import { startOrchestrator } from './services/orchestrator.js';
 import { getCurrentToken, getRecentMessages } from './services/messageBus.js';
-import { getWalletHoldings } from './services/nadfun.js';
+import { getWalletBalance, getWalletHoldings } from './services/nadfun.js';
 import { getBotConfig, ALL_BOT_IDS,  } from './bots/personalities.js';
 import { getBotBalance, getBotWallet,  } from './services/trading.js';
 import { startPredictionsResolver } from './jobs/prediction-resolver.js';
 import { getRecentMessages as getRecentMessagesFromDB } from './db/index.js';
+import { startPriceUpdater } from './jobs/price-updater.js';
+import { startImageUpdater } from './jobs/image-updater.js';
 
 // ============================================================
 // CONFIG
@@ -241,6 +243,7 @@ app.get('/api/tokens/analysis/:address', async (c) => {
         riskFlags: (token.analysis as any)?.flags || null,
         opinions: (token.analysis as any)?.opinions || null,
         analyzedAt: token.updatedAt,
+        image: token.image,
       },
       positions: {
         total: positions.length,
@@ -262,106 +265,95 @@ app.get('/api/tokens/analysis/:address', async (c) => {
 
 app.get('/api/positions', async (c) => {
   try {
-    const positions = await prisma.position.findMany({ where: { isOpen: true }, orderBy: { createdAt: 'desc' } });
+    const MON_PRICE_USD = 0.01795;
     
-    // Get unique bot wallet addresses
-    const botWallets: Record<string, string> = {};
-    for (const botId of ALL_BOT_IDS) {
-      const addr = getBotWallet(botId);
-      if (addr) botWallets[botId] = addr;
-    }
+    const positions = await prisma.position.findMany({ 
+      where: { isOpen: true }, 
+      orderBy: { createdAt: 'desc' },
+    });
     
-    // Fetch holdings for all bots in parallel (cached for 2 min)
-    const holdingsMap: Record<string, Record<string, { amount: number; currentValueMon: number; currentPrice: number }>> = {};
-
-   
+    // Récupère les prix ET images depuis la DB
+    const tokenAddresses = [...new Set(positions.map(p => p.tokenAddress))];
+    console.log("tokenAddresses =====>", tokenAddresses);
+    const tokens = await prisma.token.findMany({
+      where: { address: { in: tokenAddresses } },
+      select: { address: true, price: true, image: true },
+    });
+    console.log("tokens =====>", tokens);
     
-    await Promise.all(
-      Object.entries(botWallets).map(async ([botId, walletAddress]) => {
-        try {
-          const holdings = await getWalletHoldings(walletAddress);
-          console.log("holdings",holdings);
-          holdingsMap[botId] = {};
-          for (const h of holdings) {
-
-            
-            holdingsMap[botId][h.tokenAddress.toLowerCase()] = {
-              amount: h.amount,
-              currentValueMon: h.valueMon,
-              currentPrice: h.priceUsd,
-            };
-
-            console.log("h",h)
-
-            if(h.tokenAddress === "0x91ce820dD39A2B5639251E8c7837998530Fe7777") {
-            console.log("holdingsssss",h);
-            }
-          }
-        } catch (e) {
-          console.error(`Error fetching holdings for ${botId}:`, e);
-          holdingsMap[botId] = {};
-        }
-      })
-    );
-
-
-    // Enrich positions with current value and PnL
-    const enrichedPositions = positions.map((p:any) => {
-      const entryValueMON = Number(p.entryValueMon) || 0;
-      const entryPrice = Number(p.entryPrice) || 0;
-      const dbAmount = Number(p.amount) || 0;
-      
-      // Get current holding data from API
-      const botHoldings = holdingsMap[p.botId] || {};
-      const currentHolding = botHoldings[p.tokenAddress.toLowerCase()];
-      
-      // Use API data if available, otherwise use DB data
-      const currentAmount = currentHolding?.amount || dbAmount;
-      const currentValueMON = currentHolding?.currentValueMon || 0;
-      const currentPrice = currentHolding?.currentPrice || 0;
-      
-      // Calculate PnL
-      const pnlMON = currentValueMON - entryValueMON;
-      const pnlPercent = entryValueMON > 0 ? (pnlMON / entryValueMON) * 100 : 0;
-      
-      return { 
-        id: p.id, 
-        botId: p.botId, 
-        tokenAddress: p.tokenAddress, 
-        tokenSymbol: p.tokenSymbol, 
-        amount: currentAmount,
-        entryAmount: dbAmount,
-        entryValueMON, 
-        entryPrice,
-        currentValueMON: Math.round(currentValueMON * 1000) / 1000,
-        currentPrice,
-        pnlMON: Math.round(pnlMON * 1000) / 1000,
-        pnlPercent: Math.round(pnlPercent * 10) / 10,
-        isOpen: p.isOpen, 
-        createdAt: p.createdAt 
+    const tokenMap: Record<string, { price: number; image: string | null }> = {};
+    tokens.forEach(t => {
+      tokenMap[t.address.toLowerCase()] = {
+        price: t.price || 0,
+        image: t.image || null,
       };
     });
 
-    // Calculate portfolio totals per bot
-    const portfolios = ALL_BOT_IDS.map(botId => {
+    const enrichedPositions = positions.map((p: any) => {
+      const entryPrice = Number(p.entryPrice) || 0;
+      const tokenData = tokenMap[p.tokenAddress.toLowerCase()];
+      const currentPrice = tokenData?.price || 0;
+      const tokenImage = tokenData?.image;
+      const amount = Number(p.amount) || 0;
+      const entryValueMON = Number(p.entryValueMon) || 0;
+      
+      const profitUSD = amount * (currentPrice - entryPrice);
+      const profitMON = profitUSD / MON_PRICE_USD;
+      const currentValueMON = entryValueMON + profitMON;
+      const profitPercent = entryValueMON > 0 ? (profitMON / entryValueMON) * 100 : 0;
+     
+      return {
+        id: p.id,
+        botId: p.botId,
+        tokenAddress: p.tokenAddress,
+        tokenSymbol: p.tokenSymbol,
+        tokenImage, 
+        amount,
+        entryValueMON,
+        currentValueMON: Math.round(currentValueMON * 1000) / 1000,
+        pnlMON: Math.round(profitMON * 1000) / 1000,
+        pnlPercent: Math.round(profitPercent * 10) / 10,
+        isOpen: p.isOpen,
+        createdAt: p.createdAt,
+      };
+    });
+
+    console.log("enrichedPositions =====>", enrichedPositions[0]);
+
+    const portfolios = await Promise.all(ALL_BOT_IDS.map(async (botId) => {
       const config = getBotConfig(botId);
-      const botPositions = enrichedPositions.filter((p:any) => p.botId === botId);
-      const totalInvested = botPositions.reduce((sum:any, p:any) => sum + p.entryValueMON, 0);
-      const totalCurrentValue = botPositions.reduce((sum:any, p:any ) => sum + p.currentValueMON, 0);
-      const totalPnlMON = totalCurrentValue - totalInvested;
+      const botPositions = enrichedPositions.filter(p => p.botId === botId);
+      
+      const totalInvested = botPositions.reduce((sum, p) => sum + p.entryValueMON, 0);
+      const totalPnlMON = botPositions.reduce((sum, p) => sum + p.pnlMON, 0);
+      const totalCurrentValue = totalInvested + totalPnlMON;
       const totalPnlPercent = totalInvested > 0 ? (totalPnlMON / totalInvested) * 100 : 0;
       
-      return { 
-        botId, 
-        name: config?.name || botId, 
-        positions: botPositions, 
+      const wins = botPositions.filter(p => p.pnlMON > 0).length;
+      const losses = botPositions.filter(p => p.pnlMON < 0).length;
+      
+      let balance = 0;
+      try {
+        balance = await getBotBalance(botId);
+      } catch (e) {
+        console.error(`Error fetching balance for ${botId}:`, e);
+      }
+      
+      return {
+        botId,
+        name: config?.name || botId,
+        positions: botPositions,
         totalInvested: Math.round(totalInvested * 1000) / 1000,
         totalCurrentValue: Math.round(totalCurrentValue * 1000) / 1000,
-        totalPnlMON: Math.round(totalPnlMON * 1000) / 1000,
-        totalPnlPercent: Math.round(totalPnlPercent * 10) / 10,
-        openPositions: botPositions.length 
+        pnlMON: Math.round(totalPnlMON * 1000) / 1000,
+        pnlPercent: Math.round(totalPnlPercent * 10) / 10,
+        wins,
+        losses,
+        winRate: botPositions.length > 0 ? Math.round((wins / botPositions.length) * 100) : 0,
+        openPositions: botPositions.length,
+        monBalance: Math.round(balance * 1000) / 1000,
       };
-    });
+    }));
 
     return c.json({ positions: enrichedPositions, portfolios, timestamp: new Date().toISOString() });
   } catch (error) {
@@ -698,6 +690,7 @@ async function shutdown(): Promise<void> {
 
 process.on('SIGINT', async () => { await shutdown(); process.exit(0); });
 process.on('SIGTERM', async () => { await shutdown(); process.exit(0); });
-
+startPriceUpdater();
+startImageUpdater();
 startPredictionsResolver();
 main().catch(console.error);

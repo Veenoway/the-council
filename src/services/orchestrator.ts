@@ -941,7 +941,9 @@ Cryptic but data-backed insight.`;
     if (harpalVeto) await systemMsg(`VETOED by Harpal - Exit liquidity too risky`);
     await systemMsg(`📊 ${verdict.toUpperCase()} (${finalBulls.length}/5 @ ${avgConf.toFixed(0)}% avg)`);
 
-    await saveToken(token, { tokenAddress: token.address, riskScore: riskResult.score, flags: riskResult.flags, verdict, opinions: opinions as any });
+    console.log("tokentokentoken =====>", token);
+
+    await saveToken(token, { tokenAddress: token.address, riskScore: riskResult.score, flags: riskResult.flags, verdict, opinions: opinions as any, image: token.image });
     broadcastVerdict(token, verdict, opinions);
 
     // ========== EXECUTE TRADES ==========

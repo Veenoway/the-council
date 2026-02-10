@@ -72,6 +72,7 @@ model Token {
   analysis       Json?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  image          String?
 
   @@index([symbol])
   @@index([verdict])
@@ -175,3 +176,4 @@ model AgentVote {
   confidence   Int
   wasCorrect   Boolean?
 }
+

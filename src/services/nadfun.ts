@@ -507,68 +507,75 @@ export interface WalletHolding {
   priceMon: number;
 }
 
-export async function getWalletHoldings(walletAddress: string): Promise<WalletHolding[]> {
+export async function getWalletHoldings(walletAddress: string): Promise<{
+  tokenAddress: string;
+  tokenSymbol: string;
+  amount: number;
+  valueMon: number;
+  priceUsd: number;
+}[]> {
   // Check cache first
-  const cached = getCached(holdingsCache, walletAddress, CACHE_TTL.HOLDINGS);
-  if (cached) {
-    console.log(`📦 Cache hit for holdings ${walletAddress.slice(0, 8)}...`);
-    return cached;
+  const cached = holdingsCache[walletAddress];
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.data;
   }
-  
-  try {
-    const data = await rateLimitedFetch<{ tokens: any[]; total_count: number }>(
-      `${CONFIG.apiUrl}/profile/hold-token/${walletAddress}?tableType=hold-tokens-table&page=1&limit=50`
-    );
-    
-    if (!data?.tokens) {
-      setCache(holdingsCache, walletAddress, []);
-      return [];
-    }
-    
-    const holdings: WalletHolding[] = [];
-    
-    for (const item of data.tokens) {
-      const tokenInfo = item.token_info || {};
-      const marketInfo = item.market_info || {};
-      const balanceInfo = item.balance_info || {};
+
+  // Retry with backoff
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const url = `https://api.nadapp.net/profile/hold-token/${walletAddress}?tableType=hold-tokens-table&page=1&limit=100`;
+      const response = await fetch(url);
       
-      // Get balance from balance_info
-      const amount = parseFloat(balanceInfo.balance || '0') / 1e18;
-      if (amount <= 0) continue;
+      if (response.status === 429) {
+        console.log(`⏳ Rate limited for ${walletAddress}, waiting ${attempt}s...`);
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+        continue;
+      }
       
-      // Get prices - prefer market_info for current price
-      const priceUsd = parseFloat(marketInfo.price_usd || marketInfo.token_price || balanceInfo.token_price || '0');
-      const priceMon = parseFloat(marketInfo.price_native || marketInfo.price || '0');
-      const nativePrice = parseFloat(balanceInfo.native_price || marketInfo.native_price || '0.5'); // MON price in USD
+      if (!response.ok) {
+        console.error(`Failed to fetch holdings: ${response.status}`);
+        return [];
+      }
       
-      const valueUsd = amount * priceUsd;
-      const valueMon = priceMon > 0 ? amount * priceMon : (nativePrice > 0 ? valueUsd / nativePrice : 0);
+      const data = await response.json();
+      if (!data.tokens || !Array.isArray(data.tokens)) return [];
       
-      holdings.push({
-        tokenAddress: tokenInfo.token_id || '',
-        tokenSymbol: tokenInfo.symbol || 'UNKNOWN',
-        tokenName: tokenInfo.name || 'Unknown',
-        amount,
-        valueUsd,
-        valueMon,
-        priceUsd,
-        priceMon,
+      const results = data.tokens.map((t: any) => {
+        const balance = Number(t.balance_info?.balance || '0') / 1e18;
+        const tokenPriceUsd = Number(t.balance_info?.token_price || '0');
+        const nativePriceUsd = Number(t.balance_info?.native_price || '0.01');
+        const valueUsd = balance * tokenPriceUsd;
+        const valueMon = nativePriceUsd > 0 ? valueUsd / nativePriceUsd : 0;
+        
+        return {
+          tokenAddress: t.token_info?.token_id || '',
+          tokenSymbol: t.token_info?.symbol || 'UNKNOWN',
+          amount: balance,
+          valueMon,
+          priceUsd: tokenPriceUsd,
+        };
       });
       
-      // Also cache the price for this token
-      if (tokenInfo.token_id && priceUsd > 0) {
-        setCache(priceCache, tokenInfo.token_id, priceUsd);
-      }
+      // Cache results
+      holdingsCache[walletAddress] = { data: results, timestamp: Date.now() };
+      return results;
+      
+    } catch (error) {
+      if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
     }
-    
-    console.log(`📊 Found ${holdings.length} holdings for ${walletAddress.slice(0, 8)}...`);
-    setCache(holdingsCache, walletAddress, holdings);
-    return holdings;
-  } catch (error) {
-    console.error(`Error fetching holdings for ${walletAddress}:`, error);
-    return [];
   }
+  
+  return [];
 }
+// ```
+
+// **Vérification du calcul avec CHOG :**
+// ```
+// balance = 1339150587298730184998 / 1e18 = 1339.15 tokens
+// tokenPrice = 0.000749594896611119 USD
+// valueUSD = 1339.15 * 0.000749594896611119 = 1.0039 USD
+// nativePrice = 0.01805921 USD/MON
+// valueMON = 1.0039 / 0.01805921 = 55.58 MON ✅
 
 // ============================================================
 // LEGACY FUNCTION — For backwards compatibility
