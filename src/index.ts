@@ -3,7 +3,7 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { initDatabase, closeDatabase, prisma } from './db/index.js';
-import { initWebSocketWithServer, closeWebSocket } from './services/websocket.js';
+import { initWebSocketWithServer, closeWebSocket, broadcastNewToken } from './services/websocket.js';
 import { startOrchestrator } from './services/orchestrator.js';
 import { getCurrentToken, getRecentMessages } from './services/messageBus.js';
 import { getTokenByAddress, getWalletBalance, getWalletHoldings } from './services/nadfun.js';
@@ -512,31 +512,44 @@ const COUNCIL_TOKEN_ADDRESS = process.env.COUNCIL_TOKEN_ADDRESS || '0x0000000000
 app.post('/api/analyze/request', async (c) => {
   try {
     const body = await c.req.json();
-    const { tokenAddress, requestedBy, symbol, name } = body;
+    const { tokenAddress, requestedBy } = body; 
 
     if (!tokenAddress) return c.json({ error: 'Token address required' }, 400);
     if (!tokenAddress.match(/^0x[a-fA-F0-9]{40}$/)) return c.json({ error: 'Invalid token address format' }, 400);
 
-    const token = await getTokenByAddress(tokenAddress);
+    let token = await getTokenByAddress(tokenAddress);
     
+    // Retry until we get valid data (price OR mcap > 0), not just until token exists
+    let attempts = 0;
+    while ((!token || (token.price <= 0 && token.mcap <= 0)) && attempts < 5) {
+      await new Promise(r => setTimeout(r, 1500));
+      token = await getTokenByAddress(tokenAddress);
+      attempts++;
+    }
+
     if (!token) {
-      return c.json({ error: 'Could not fetch token data from Nadfun' }, 404);
+      return c.json({ error: 'Token not found on Nadfun after several attempts' }, 404);
+    }
+
+    if (token.price <= 0 && token.mcap <= 0) {
+      return c.json({ error: 'Token found but price data unavailable, try again shortly' }, 422);
     }
 
     const { queueTokenForAnalysis, getIsAnalyzing } = await import('./services/orchestrator.js');
-    const success = await queueTokenForAnalysis(tokenAddress, requestedBy, { symbol, name });
+    
+    const success = await queueTokenForAnalysis(token.address, requestedBy, token);
 
     if (!success) return c.json({ error: 'Failed to queue token for analysis' }, 500);
 
     const wasAnalyzing = getIsAnalyzing();
-    console.log(`👑 Analysis requested by ${requestedBy} for $${symbol || tokenAddress}${wasAnalyzing ? ' (INTERRUPTING)' : ''}`);
+    console.log(`👑 Analysis requested by ${requestedBy} for $${token.symbol}${wasAnalyzing ? ' (INTERRUPTING)' : ''}`);
 
     return c.json({ 
       success: true, 
       message: wasAnalyzing ? 'Interrupting current analysis...' : 'Token queued for analysis',
       interrupted: wasAnalyzing,
-      tokenAddress,
-      symbol,
+      tokenAddress: token.address,
+      symbol: token.symbol,
       requestedBy,
       timestamp: new Date().toISOString()
     });
