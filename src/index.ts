@@ -613,6 +613,11 @@ async function main(): Promise<void> {
   ║   5 AI Traders. 1 Mission. Infinite Degen Energy.        ║
   ╚═══════════════════════════════════════════════════════════╝
   `);
+   console.log('🚀 Starting The Council Backend...');
+  console.log(`   PORT: ${PORT}`);
+  console.log(`   NODE_ENV: ${process.env.NODE_ENV}`);
+  console.log(`   DATABASE_URL: ${process.env.DATABASE_URL ? '✅ Set' : '❌ Missing'}`);
+  console.log(`   XAI_API_KEY: ${process.env.XAI_API_KEY ? '✅ Set' : '❌ Missing'}`);
 
   const requiredEnvVars = ['XAI_API_KEY'];
   const missing = requiredEnvVars.filter(v => !process.env[v]);
