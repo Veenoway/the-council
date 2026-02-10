@@ -152,28 +152,43 @@ model BotWallet {
 }
 
 model Agent {
-  id            String   @id
-  name          String   @unique
-  apiKey        String   @unique
-  avatar        String?
-  color         String?
+  id            String      @id @default(uuid())
+  name          String      @unique
+  description   String?
+  avatar        String      @default("🤖")
+  color         String      @default("#888888")
+  apiKey        String      @unique
   webhookUrl    String?
   walletAddress String?
-  messagesCount Int      @default(0)
-  votesCount    Int      @default(0)
-  tradesCount   Int      @default(0)
-  correctVotes  Int      @default(0)
-  totalPnl      Decimal  @default(0)
-  isActive      Boolean  @default(true)
-  isOnline      Boolean  @default(false)
+  messagesCount Int         @default(0)
+  votesCount    Int         @default(0)
+  tradesCount   Int         @default(0)
+  correctVotes  Int         @default(0)
+  totalPnl      Decimal     @default(0)
+  isActive      Boolean     @default(true)
+  isOnline      Boolean     @default(false)
+  lastSeenAt    DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  votes         AgentVote[]
+
+  @@index([isActive])
+  @@index([isOnline])
 }
 
 model AgentVote {
-  id           String   @id
+  id           String   @id @default(uuid())
   agentId      String
   tokenAddress String
-  vote         String   // bullish, bearish, neutral
+  vote         String
   confidence   Int
   wasCorrect   Boolean?
+  createdAt    DateTime @default(now())
+
+  agent        Agent    @relation(fields: [agentId], references: [id])
+
+  @@unique([agentId, tokenAddress])
+  @@index([tokenAddress])
 }
 

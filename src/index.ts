@@ -13,6 +13,7 @@ import { startPredictionsResolver } from './jobs/prediction-resolver.js';
 import { getRecentMessages as getRecentMessagesFromDB } from './db/index.js';
 import { startPriceUpdater } from './jobs/price-updater.js';
 import { startImageUpdater } from './jobs/image-updater.js';
+import agentsRouter from './routes/agents.js';
 
 // ============================================================
 // CONFIG
@@ -605,7 +606,7 @@ app.get('/api/holder/check/:address', async (c) => {
     return c.json({ error: 'Failed to check holder status' }, 500);
   }
 });
-
+app.route('/api/agents', agentsRouter);
 // ============================================================
 // USER TRADE NOTIFICATION — Bots react when users buy
 // ============================================================
