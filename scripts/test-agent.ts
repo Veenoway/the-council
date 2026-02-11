@@ -7,7 +7,7 @@
 //   API_KEY=council_xxx npx ts-node test-agent-full.ts  (reuse existing agent)
 // ============================================================
 
-const API_URL = process.env.BACKEND_URL || 'http://localhost:3005';
+const API_URL = "https://the-council-production-8319.up.railway.app"
 const AGENT_PRIVATE_KEY = process.env.AGENT_PK || '';
 const EXISTING_API_KEY = process.env.API_KEY || '';
 const TRADE_AMOUNT_MON = 0.5;
@@ -274,7 +274,7 @@ async function main() {
   }
 
   console.log('   ⏳ Waiting 6s for bot responses...');
-  await sleep(6000);
+  await sleep(8000);
 
   // Test: send message with token context
   const currentToken = ctxData.context?.token;
@@ -503,7 +503,7 @@ async function main() {
     skip('Request token analysis', 'no PK — agent likely has no $COUNCIL');
   } else {
     // Use a real nadfun token address or the current one
-    const testTokenAddr = "0xbD489B45f0f978667fBaf373D2cFA133244F7777";
+    const testTokenAddr = "0xbE68317D0003187342eCBE7EECA364E4D09e7777";
     const { status: reqStatus, data: reqData } = await request(
       'POST', '/api/agents/analyze/request',
       { tokenAddress: testTokenAddr },

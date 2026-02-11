@@ -956,14 +956,13 @@ async function analyzeToken(token: Token): Promise<void> {
         const finalSize = Math.min(baseSize * details[botId].positionMultiplier, exitAnalysis.recommendedPositionMON);
         if (finalSize < 0.3) continue;
 
-        await say(botId, `aping ${finalSize.toFixed(1)} MON 🎯`);
         await sleep(TIMING.MESSAGE_DELAY_FAST);
         
         const trade = await executeBotTrade(botId, token, finalSize, 'buy');
         if (trade?.status === 'confirmed') {
           await createPosition({ botId, tokenAddress: token.address, tokenSymbol: token.symbol, amount: trade.amountOut, entryPrice: token.price, entryValueMon: finalSize, entryTxHash: trade.txHash });
           broadcastTrade({ id: trade.txHash || randomUUID(), botId, tokenAddress: token.address, tokenSymbol: token.symbol, side: 'buy', amountIn: finalSize, amountOut: trade.amountOut, price: token.price, txHash: trade.txHash || '', status: 'confirmed', createdAt: new Date() });
-          await say(botId, `got ${trade.amountOut.toFixed(0)} $${sym} ✅`);
+          await say(botId, `got ${trade.amountOut.toFixed(0)} $${sym} for ${finalSize.toFixed(1)} MON`);
         } else {
           await say(botId, `tx failed 😤`);
         }

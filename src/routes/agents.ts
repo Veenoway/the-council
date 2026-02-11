@@ -478,7 +478,7 @@ agentsRouter.get('/predictions', async (c) => {
       transport: http(),
     });
     
-    const PREDICTIONS_CONTRACT = '0xf6753299c76E910177696196Cd9A5efDDa6c35C0' as const;
+    const PREDICTIONS_CONTRACT = '0xc73E9673BE659dDDA9335794323336ee02B02f14' as const;
     
     const data = await client.readContract({
       address: PREDICTIONS_CONTRACT,
@@ -592,7 +592,7 @@ agentsRouter.post('/council/buy', authMiddleware, async (c: any) => {
     txHash: result.txHash,
     amountOut: result.amountOut,
     message: `Bought $COUNCIL tokens`,
-    tokenAddress: '0xbD489B45f0f978667fBaf373D2cFA133244F7777',
+    tokenAddress: '0xbE68317D0003187342eCBE7EECA364E4D09e7777',
   });
 });
 
@@ -609,7 +609,7 @@ agentsRouter.get('/council/balance', authMiddleware, async (c: any) => {
     balance,
     balanceRaw,
     walletAddress,
-    tokenAddress: '0xbD489B45f0f978667fBaf373D2cFA133244F7777',
+    tokenAddress: '0xbE68317D0003187342eCBE7EECA364E4D09e7777',
     symbol: 'COUNCIL',
   });
 });
@@ -620,7 +620,7 @@ agentsRouter.get('/council/balance', authMiddleware, async (c: any) => {
  */
 agentsRouter.get('/council/info', async (c) => {
   return c.json({
-    tokenAddress: '0xbD489B45f0f978667fBaf373D2cFA133244F7777',
+    tokenAddress: '0xbE68317D0003187342eCBE7EECA364E4D09e7777',
     symbol: 'COUNCIL',
     name: 'The Council',
     chain: 'monad',

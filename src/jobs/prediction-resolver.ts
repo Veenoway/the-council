@@ -13,7 +13,7 @@ import { prisma } from '../db/index.js';
 // Config
 const RPC_URL = process.env.MONAD_RPC_URL || 'https://rpc.monad.xyz';
 const PRIVATE_KEY = process.env.ORACLE_PRIVATE_KEY as `0x${string}`;
-const PREDICTIONS_CONTRACT ="0xf6753299c76E910177696196Cd9A5efDDa6c35C0";
+const PREDICTIONS_CONTRACT ="0xc73E9673BE659dDDA9335794323336ee02B02f14";
 
 
 
