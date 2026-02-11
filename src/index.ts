@@ -550,49 +550,54 @@ app.get('/api/stats', async (c) => {
 
 const COUNCIL_TOKEN_ADDRESS = process.env.COUNCIL_TOKEN_ADDRESS || '0x0000000000000000000000000000000000000000';
 
+// server.ts — /api/analyze/request — REPLACE the retry logic
+
 app.post('/api/analyze/request', async (c) => {
   try {
     const body = await c.req.json();
-    const { tokenAddress, requestedBy } = body; 
+    const { tokenAddress, requestedBy, tokenData } = body;
 
     if (!tokenAddress) return c.json({ error: 'Token address required' }, 400);
     if (!tokenAddress.match(/^0x[a-fA-F0-9]{40}$/)) return c.json({ error: 'Invalid token address format' }, 400);
 
-    let token = await getTokenByAddress(tokenAddress);
-    
-    // Retry until we get valid data (price OR mcap > 0), not just until token exists
-    let attempts = 0;
-    while ((!token || (token.price <= 0 && token.mcap <= 0)) && attempts < 5) {
-      await new Promise(r => setTimeout(r, 1500));
+    // Use frontend-provided data if available
+    let token = tokenData && tokenData.symbol
+      ? {
+          ...tokenData,
+          createdAt: tokenData.createdAt instanceof Date ? tokenData.createdAt : new Date(tokenData.createdAt || 0),
+          priceChange24h: tokenData.priceChange24h || 0,
+          holders: tokenData.holders || 0,
+          deployer: tokenData.deployer || '',
+        }
+      : await getTokenByAddress(tokenAddress);
+
+    // Quick fallback if no data provided and fetch failed
+    if (!token) {
+      await new Promise(r => setTimeout(r, 2000));
       token = await getTokenByAddress(tokenAddress);
-      attempts++;
     }
 
     if (!token) {
-      return c.json({ error: 'Token not found on Nadfun after several attempts' }, 404);
+      return c.json({ error: 'Token not found' }, 404);
     }
 
-    if (token.price <= 0 && token.mcap <= 0) {
-      return c.json({ error: 'Token found but price data unavailable, try again shortly' }, 422);
-    }
+    // Ensure address is set
+    token.address = tokenAddress;
 
     const { queueTokenForAnalysis, getIsAnalyzing } = await import('./services/orchestrator.js');
-    
+    const wasAnalyzing = getIsAnalyzing();
     const success = await queueTokenForAnalysis(token.address, requestedBy, token);
 
-    if (!success) return c.json({ error: 'Failed to queue token for analysis' }, 500);
+    if (!success) return c.json({ error: 'Failed to queue token' }, 500);
 
-    const wasAnalyzing = getIsAnalyzing();
     console.log(`👑 Analysis requested by ${requestedBy} for $${token.symbol}${wasAnalyzing ? ' (INTERRUPTING)' : ''}`);
 
-    return c.json({ 
-      success: true, 
+    return c.json({
+      success: true,
       message: wasAnalyzing ? 'Interrupting current analysis...' : 'Token queued for analysis',
       interrupted: wasAnalyzing,
       tokenAddress: token.address,
       symbol: token.symbol,
-      requestedBy,
-      timestamp: new Date().toISOString()
     });
   } catch (error) {
     console.error('Error processing analysis request:', error);

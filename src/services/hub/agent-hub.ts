@@ -559,7 +559,7 @@ export async function executeAgentTradeWithPK(
     broadcastMessage({
       id: randomUUID(),
       botId: `agent_${agentId}`,
-      content: `💰 Bought ${amountOut.toLocaleString()} $${tokenSymbol} for ${amountMON} MON`,
+      content: `Bought ${amountOut.toLocaleString()} $${tokenSymbol} for ${amountMON} MON`,
       token: tokenAddress,
       messageType: 'trade',
       agentName,

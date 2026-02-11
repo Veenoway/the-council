@@ -647,7 +647,8 @@ export async function calculateRiskScore(token: Token): Promise<{ score: number;
   }
 
   // Age check
-  const ageHours = (Date.now() - token.createdAt.getTime()) / (1000 * 60 * 60);
+ const createdAt = token?.createdAt instanceof Date ? token.createdAt : new Date(token?.createdAt || 0);
+const ageHours = (Date.now() - createdAt.getTime()) / (1000 * 60 * 60);
   if (ageHours < 1) {
     flags.push('Very new (<1h)');
     score += 15;

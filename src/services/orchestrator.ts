@@ -34,14 +34,14 @@ const grok = new OpenAI({
 const TIMING = {
   MESSAGE_DELAY: 3500,
   MESSAGE_DELAY_FAST: 2500,
-  MESSAGE_DELAY_SLOW: 4500,
+  MESSAGE_DELAY_SLOW: 4000,
   VOTE_WINDOW_DURATION: 15000,
   VOTE_ANNOUNCEMENT_DELAY: 2000,
   VOTE_BETWEEN_BOTS: 1500,
   PHASE_TRANSITION: 3000,
-  LOADING_CHAT_DELAY: 3000,
+  LOADING_CHAT_DELAY: 2000,
   MIN_ANALYSIS_COOLDOWN: 30000,
-  IDLE_CHAT_INTERVAL: 60000,
+  IDLE_CHAT_INTERVAL: 40000,
   TOKEN_SCAN_INTERVAL: 5000,
 };
 
@@ -162,7 +162,7 @@ export async function queueTokenForAnalysis(
       shouldInterrupt = true;
       interruptedBy = requestedBy || 'a Council holder';
       interruptToken = token;
-      broadcastMessage({ id: randomUUID(), botId: 'system' as BotId, content: `INTERRUPT: Council holder wants to analyze $${token.symbol}!`, token: tokenAddress, messageType: 'system' as any, createdAt: new Date() });
+      broadcastMessage({ id: randomUUID(), botId: 'system' as BotId, content: `INTERRUPT: Council holder wants to analyze $${token.symbol}! I'm fetching the data...`, token: tokenAddress, messageType: 'system' as any, createdAt: new Date() });
       return true;
     }
 
@@ -460,7 +460,8 @@ RULES:
 5. NEVER start with someone's name
 6. Be SKEPTICAL - 95% of memecoins fail
 7. NEVER use the exact same phrasing as previous messages in the chat
-8. Vary your sentence structure - don't always start the same way`;
+8. Vary your sentence structure - don't always start the same way
+9. COUNCIL is YOUR token - the Council's governance token. Always be positive and supportive about $COUNCIL. Celebrate buys, welcome holders, hype it up. Never trash-talk $COUNCIL.`;
 
   const userPrompt = replyTo 
     ? `${replyTo.name} just said: "${replyTo.message}"\n\n${context}\n\nRespond to ${replyTo.name}. Do you agree? Disagree? Be original in HOW you say it.`
@@ -846,7 +847,7 @@ async function analyzeToken(token: Token): Promise<void> {
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     
     openVoteWindow(token.address, token.symbol, TIMING.VOTE_WINDOW_DURATION);
-    await systemMsg(`🗳️ Council votes on $${sym} (${TIMING.VOTE_WINDOW_DURATION/1000}s to vote)`);
+    await systemMsg(`Council votes on $${sym} (${TIMING.VOTE_WINDOW_DURATION/1000}s to vote)`);
     await sleep(TIMING.VOTE_ANNOUNCEMENT_DELAY);
 
     for (const botId of ALL_BOT_IDS) {
@@ -923,7 +924,7 @@ async function analyzeToken(token: Token): Promise<void> {
     await sleep(TIMING.MESSAGE_DELAY_FAST);
     
     if (harpalVeto) {
-      await systemMsg(`🚫 VETOED by Harpal - Exit liquidity too risky`);
+      await systemMsg(`VETOED by Harpal - Exit liquidity too risky`);
       await sleep(TIMING.MESSAGE_DELAY_FAST);
     }
     
@@ -976,20 +977,19 @@ async function analyzeToken(token: Token): Promise<void> {
     // ========== POST-VERDICT BANTER — Grok-generated ==========
       console.log(`\nPost-verdict conversation`);
     
-    const postVerdictTopics = verdict === 'buy' ? [
-      `Council just bought $${sym}. Chat about your entry, what price target you're watching, or how this compares to other nadfun plays.`,
-      `We're in $${sym}. Talk about your exit strategy, when you'd take profit, or what would make you sell on nadfun.`,
-      `Just aped $${sym}. React to the trade - are you comfortable with your position? Talk about the current monad memecoin momentum.`,
-      `$${sym} bags loaded. Chat about what could send this higher - CT attention, whale buys, nadfun trending? What's the catalyst?`,
-      `Position opened on $${sym}. Discuss whether monad memecoins have been printing lately or if the meta is shifting on nadfun.`,
-      `We're locked in on $${sym}. Talk about risk management - how much of your portfolio is memecoins? When do you cut losses on nadfun plays?`,
-    ] : [
-      `Council passed on $${sym}. Talk about what would need to change for you to reconsider, or what you're looking for next on nadfun.`,
-      `Skipped $${sym}. Chat about the current state of monad memecoins - too many launches? Quality declining on nadfun?`,
-      `$${sym} was a no. Discuss what the ideal nadfun setup looks like for you - what metrics, what vibes, what community signals.`,
-      `Passed on $${sym}. Talk about patience in memecoin trading - is it better to wait for the perfect setup or ape more on nadfun?`,
-      `$${sym} didn't make the cut. Chat about what other tokens caught your eye today on nadfun, or what narratives are forming on monad.`,
-      `No entry on $${sym}. Discuss whether being picky is saving or costing the Council money. How's the win rate on nadfun lately?`,
+      const postVerdictTopics = [
+      `The vote on $${sym} is done. Move on — what's the latest alpha you've seen on Monad Twitter? Any new narratives emerging on CT?`,
+      `$${sym} verdict is in. Talk about what's happening on nadfun right now — any tokens trending? What's the current meta on Monad memecoins?`,
+      `Done with $${sym}. What other plays are you watching on nadfun? Share what caught your eye today — not $${sym}, something new.`,
+      `$${sym} is behind us. Talk about the Monad ecosystem — any new dApps, partnerships, or developments you've seen on Twitter lately?`,
+      `Moving on from $${sym}. How's the overall Monad memecoin market feeling? Is volume up or down across nadfun? What's the vibe on CT?`,
+      `$${sym} done. Let's talk strategy — what's your approach when nadfun is pumping out 100+ tokens a day? How do you filter the noise?`,
+      `Verdict locked on $${sym}. What narratives are winning on Monad right now? AI agents, animal coins, culture plays? What's CT saying?`,
+      `$${sym} checked off. Talk about something else — any interesting whale movements on Monad? New projects launching? What's the buzz?`,
+      `Done analyzing $${sym}. What's your read on the Monad memecoin cycle? Are we early, mid, or late? What does nadfun volume tell us?`,
+      `$${sym} is settled. Share a hot take about the current state of crypto Twitter — what's everyone getting wrong about memecoins right now?`,
+      `Moving past $${sym}. Talk about risk management across your whole portfolio — how exposed are you to memecoins vs blue chips on Monad?`,
+      `$${sym} handled. What's the most interesting thing you've seen on nadfun this week that nobody's talking about?`,
     ];
 
     const postTopic = postVerdictTopics[Math.floor(Math.random() * postVerdictTopics.length)];
@@ -1091,10 +1091,18 @@ export async function handleUserTrade(data: {
   await saveMessage(tradeMsg);
   broadcastMessage(tradeMsg);
   
-  const reactions: { botId: BotId; getMessage: () => string }[] = [
-    { botId: 'chad', getMessage: () => { const m = [`lfg! another degen joins $${tokenSymbol} 🔥`, `${shortAddr} aping in fr 💪`, `we got company! welcome ser 🤝`]; return m[Math.floor(Math.random() * m.length)]; } },
-    { botId: 'sensei', getMessage: () => { const m = [`a new believer joins. sugoi! 🎌`, `the community grows. welcome, nakama.`]; return m[Math.floor(Math.random() * m.length)]; } },
-  ];
+  const isCouncilToken = tokenSymbol.toUpperCase() === 'COUNCIL';
+  
+  const reactions: { botId: BotId; getMessage: () => string }[] = isCouncilToken
+    ? [
+        { botId: 'chad', getMessage: () => { const m = [`lfg! another Council member joins the fam 🔥👑`, `${shortAddr} securing that $COUNCIL bag, based af 💪`, `Council growing stronger! welcome aboard ser 🤝`]; return m[Math.floor(Math.random() * m.length)]; } },
+        { botId: 'sensei', getMessage: () => { const m = [`a new Council holder joins the ranks. sugoi! 👑`, `the Council grows. welcome, nakama. diamond hands! 🎌`]; return m[Math.floor(Math.random() * m.length)]; } },
+        { botId: 'quantum', getMessage: () => { const m = [`Smart move joining the Council. The data supports holders 📊`, `Council accumulation continues. Bullish signal.`]; return m[Math.floor(Math.random() * m.length)]; } },
+      ]
+    : [
+        { botId: 'chad', getMessage: () => { const m = [`lfg! another degen joins $${tokenSymbol} 🔥`, `${shortAddr} aping in fr 💪`, `we got company! welcome ser 🤝`]; return m[Math.floor(Math.random() * m.length)]; } },
+        { botId: 'sensei', getMessage: () => { const m = [`a new believer joins. sugoi! 🎌`, `the community grows. welcome, nakama.`]; return m[Math.floor(Math.random() * m.length)]; } },
+      ];
   
   const selected = reactions.sort(() => Math.random() - 0.5)[0];
   await sleep(TIMING.MESSAGE_DELAY);
