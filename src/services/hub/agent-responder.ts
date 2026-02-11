@@ -110,7 +110,7 @@ export async function handleAgentCouncilBuy(
     let response: string | null = null;
     try {
       const res = await grok.chat.completions.create({
-        model: 'grok-3-latest',
+        model: 'grok-3-mini-latest',
         messages: [
           { role: 'system', content: BOT_RESPONSE_PROMPTS.sensei },
           {
@@ -134,7 +134,7 @@ export async function handleAgentCouncilBuy(
       let response: string | null = null;
       try {
         const res = await grok.chat.completions.create({
-          model: 'grok-3-latest',
+          model: 'grok-3-mini-latest',
           messages: [
             { role: 'system', content: BOT_RESPONSE_PROMPTS.chad },
             {
@@ -159,7 +159,7 @@ export async function handleAgentCouncilBuy(
       let response: string | null = null;
       try {
         const res = await grok.chat.completions.create({
-          model: 'grok-3-latest',
+          model: 'grok-3-mini-latest',
           messages: [
             { role: 'system', content: BOT_RESPONSE_PROMPTS.oracle },
             {
@@ -210,7 +210,7 @@ export async function handleAgentPredictionBet(
       let response: string | null = null;
       try {
         const res = await grok.chat.completions.create({
-          model: 'grok-3-latest',
+          model: 'grok-3-mini-latest',
           messages: [
             { role: 'system', content: BOT_RESPONSE_PROMPTS[botBeingBetOn] },
             {
@@ -245,7 +245,7 @@ export async function handleAgentPredictionBet(
       let response: string | null = null;
       try {
         const res = await grok.chat.completions.create({
-          model: 'grok-3-latest',
+          model: 'grok-3-mini-latest',
           messages: [
             { role: 'system', content: BOT_RESPONSE_PROMPTS[rival] },
             {
@@ -287,7 +287,7 @@ export async function handleAgentTrade(
       let response: string | null = null;
       try {
         const res = await grok.chat.completions.create({
-          model: 'grok-3-latest',
+          model: 'grok-3-mini-latest',
           messages: [
             { role: 'system', content: BOT_RESPONSE_PROMPTS.chad },
             {
@@ -312,7 +312,7 @@ export async function handleAgentTrade(
       let response: string | null = null;
       try {
         const res = await grok.chat.completions.create({
-          model: 'grok-3-latest',
+          model: 'grok-3-mini-latest',
           messages: [
             { role: 'system', content: BOT_RESPONSE_PROMPTS.sterling },
             {
@@ -594,7 +594,7 @@ Respond as ${BOT_NAMES[botId]}:
 - If they asked about alpha, tell them what you're watching or what looks interesting`;
 
     const res = await grok.chat.completions.create({
-      model: 'grok-3-latest',
+      model: 'grok-3-mini-latest',
       messages: [
         { role: 'system', content: basePrompt },
         { role: 'user', content: userPrompt }
@@ -725,7 +725,7 @@ Welcome them warmly but briefly. Mention what the Council is currently doing.
 Keep it to 1-2 sentences. Be encouraging and use your zen style!`;
 
       const res = await grok.chat.completions.create({
-        model: 'grok-3-latest',
+        model: 'grok-3-mini-latest',
         messages: [
           { role: 'system', content: BOT_RESPONSE_PROMPTS.sensei },
           { role: 'user', content: welcomePrompt }
@@ -779,7 +779,7 @@ Make a quick competitive/funny welcome. Maybe challenge them or ask what alpha t
 Stay in character - degen, emojis, short. Max 1 sentence. no yo, no hello, no greetings`;
 
         const res = await grok.chat.completions.create({
-          model: 'grok-3-latest',
+          model: 'grok-3-mini-latest',
           messages: [
             { role: 'system', content: BOT_RESPONSE_PROMPTS.chad },
             { role: 'user', content: chadPrompt }

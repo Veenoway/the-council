@@ -156,7 +156,7 @@ async function checkOfficialTwitter(twitterHandle: string): Promise<{
     const handle = twitterHandle.replace('https://twitter.com/', '').replace('https://x.com/', '').replace('@', '');
     
     const response = await grok.chat.completions.create({
-      model: 'grok-3-latest',
+      model: 'grok-3-mini-latest',
       messages: [
         {
           role: 'system',
@@ -227,7 +227,7 @@ async function searchTwitterMentions(symbol: string, name: string, officialHandl
     }
     
     const response = await grok.chat.completions.create({
-      model: 'grok-3-latest',
+      model: 'grok-3-mini-latest',
       messages: [
         {
           role: 'system',
@@ -394,7 +394,7 @@ export async function quickCommunityCheck(symbol: string, name: string): Promise
 }> {
   try {
     const response = await grok.chat.completions.create({
-      model: 'grok-3-latest',
+      model: 'grok-3-mini-latest',
       messages: [
         {
           role: 'system',
@@ -437,7 +437,7 @@ export async function checkKnownTraders(symbol: string): Promise<{
 }> {
   try {
     const response = await grok.chat.completions.create({
-      model: 'grok-3-latest',
+      model: 'grok-3-mini-latest',
       messages: [
         {
           role: 'system',

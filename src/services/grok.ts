@@ -12,7 +12,7 @@ const openai = new OpenAI({
   baseURL: 'https://api.x.ai/v1',
 });
 
-const MODEL = 'grok-3-latest';
+const MODEL = 'grok-3-mini-latest';
 
 // ============================================================
 // HELPER
