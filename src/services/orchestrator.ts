@@ -162,12 +162,12 @@ export async function queueTokenForAnalysis(
       shouldInterrupt = true;
       interruptedBy = requestedBy || 'a Council holder';
       interruptToken = token;
-      broadcastMessage({ id: randomUUID(), botId: 'system' as BotId, content: `⚡ INTERRUPT: Council holder wants to analyze $${token.symbol}!`, token: tokenAddress, messageType: 'system' as any, createdAt: new Date() });
+      broadcastMessage({ id: randomUUID(), botId: 'system' as BotId, content: `INTERRUPT: Council holder wants to analyze $${token.symbol}!`, token: tokenAddress, messageType: 'system' as any, createdAt: new Date() });
       return true;
     }
 
     priorityQueue.unshift({ token, requestedBy: requestedBy || 'anonymous' });
-    broadcastMessage({ id: randomUUID(), botId: 'system' as BotId, content: `📋 Council holder requested analysis of $${token.symbol}`, token: tokenAddress, messageType: 'system' as any, createdAt: new Date() });
+    broadcastMessage({ id: randomUUID(), botId: 'system' as BotId, content: `Council holder requested analysis of $${token.symbol}`, token: tokenAddress, messageType: 'system' as any, createdAt: new Date() });
     return true;
   } catch (error) {
     console.error('Failed to queue token:', error);
@@ -590,7 +590,7 @@ function calculateBotOpinion(botId: BotId, scores: TokenScores, narrative: Narra
 }
 
 function shouldAbort(analysisId: string): boolean {
-  if (shouldInterrupt) { console.log(`⚡ Analysis ${analysisId.slice(0, 8)} interrupted!`); return true; }
+  if (shouldInterrupt) { console.log(`Analysis ${analysisId.slice(0, 8)} interrupted!`); return true; }
   if (currentAnalysisId !== analysisId) { console.log(`⏭️ Analysis ${analysisId.slice(0, 8)} is stale`); return true; }
   return false;
 }
@@ -846,7 +846,7 @@ async function analyzeToken(token: Token): Promise<void> {
     if (shouldAbort(analysisId)) { isAnalyzing = false; return; }
     
     openVoteWindow(token.address, token.symbol, TIMING.VOTE_WINDOW_DURATION);
-    await systemMsg(`Council votes on $${sym} (${TIMING.VOTE_WINDOW_DURATION/1000}s to vote)`);
+    await systemMsg(`🗳️ Council votes on $${sym} (${TIMING.VOTE_WINDOW_DURATION/1000}s to vote)`);
     await sleep(TIMING.VOTE_ANNOUNCEMENT_DELAY);
 
     for (const botId of ALL_BOT_IDS) {
@@ -904,24 +904,26 @@ async function analyzeToken(token: Token): Promise<void> {
     const harpalVeto = opinions.sterling === 'bearish' && exitAnalysis.liquidityRisk === 'extreme';
     
     // VOTE LOGIC:
-    // - Bulls must be >= bears to buy (tie = buy)
-    // - Neutral/pass votes don't block — only bears block
-    // - At least 1 bull required
+    // - Bulls must be strict majority (> 50% of all voters)
+    //   e.g. 3/5 = 60% ✅, 2/5 = 40% ❌, 1/5 = 20% ❌
+    // - Ties on odd numbers impossible; on even: bulls must be > half
     // - avgConf must be >= 55
     // - Harpal can veto on extreme liquidity risk
+    const bullRatio = totalVoters > 0 ? totalBulls / totalVoters : 0;
     const verdict: 'buy' | 'pass' = (
-      totalBulls >= 1 &&
-      totalBulls >= totalBears &&
+      totalBulls >= 2 &&                // minimum 2 bulls required
+      bullRatio > 0.5 &&                // strict majority of ALL voters
+      totalBulls > totalBears &&        // more bulls than bears
       avgConf >= 55 && 
       !harpalVeto
     ) ? 'buy' : 'pass';
     
-    console.log(`   Verdict: ${verdict.toUpperCase()} (bulls ${totalBulls} >= bears ${totalBears}: ${totalBulls >= totalBears}, avgConf: ${avgConf.toFixed(0)}%, veto: ${harpalVeto})`);
+    console.log(`   Verdict: ${verdict.toUpperCase()} (bulls ${totalBulls}/${totalVoters} = ${(bullRatio * 100).toFixed(0)}%, bears ${totalBears}, avgConf: ${avgConf.toFixed(0)}%, veto: ${harpalVeto})`);
 
     await sleep(TIMING.MESSAGE_DELAY_FAST);
     
     if (harpalVeto) {
-      await systemMsg(`VETOED by Harpal - Exit liquidity too risky`);
+      await systemMsg(`🚫 VETOED by Harpal - Exit liquidity too risky`);
       await sleep(TIMING.MESSAGE_DELAY_FAST);
     }
     
@@ -937,7 +939,7 @@ async function analyzeToken(token: Token): Promise<void> {
 
     // ========== EXECUTE TRADES ==========
     if (verdict === 'buy') {
-      console.log(`\n💰 Phase 9: Executing Trades`);
+      console.log(`\nPhase 9: Executing Trades`);
       await sleep(TIMING.MESSAGE_DELAY);
       
       for (const botId of internalBulls) {
@@ -972,7 +974,7 @@ async function analyzeToken(token: Token): Promise<void> {
     }
 
     // ========== POST-VERDICT BANTER — Grok-generated ==========
-    console.log(`\n💬 Post-verdict conversation`);
+      console.log(`\nPost-verdict conversation`);
     
     const postVerdictTopics = verdict === 'buy' ? [
       `Council just bought $${sym}. Chat about your entry, what price target you're watching, or how this compares to other nadfun plays.`,
@@ -1020,12 +1022,12 @@ async function analyzeToken(token: Token): Promise<void> {
 
   } catch (error) {
     console.error('❌ Analysis error:', error);
-    await systemMsg(`Analysis interrupted`);
+    await systemMsg(`⚠️ Analysis interrupted`);
   } finally {
     isAnalyzing = false;
     lastAnalysisEnd = Date.now();
     lastTokenScan = 0;
-    console.log(`Cooldown: ${TIMING.MIN_ANALYSIS_COOLDOWN/1000}s before next token`);
+    console.log(`⏳ Cooldown: ${TIMING.MIN_ANALYSIS_COOLDOWN/1000}s before next token`);
   }
 }
 
@@ -1035,7 +1037,7 @@ async function analyzeToken(token: Token): Promise<void> {
 
 async function say(botId: BotId, content: string, analysisId?: string): Promise<void> {
   if (!content || content.length < 2) return;
-  if (analysisId && currentAnalysisId !== analysisId) { console.log(`Skipping stale message from ${botId}`); return; }
+  if (analysisId && currentAnalysisId !== analysisId) { console.log(`⏭️ Skipping stale message from ${botId}`); return; }
   const normalized = content.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 50);
   if (sentMessages.has(normalized)) return;
   sentMessages.add(normalized);
@@ -1082,11 +1084,10 @@ export async function handleUserTrade(data: {
   txHash: string;
 }): Promise<void> {
   const { userAddress, tokenSymbol, amountMon, amountTokens } = data;
-  console.log(`💰 User trade: ${amountMon} MON → ${amountTokens} $${tokenSymbol}`);
+  console.log(`User trade: ${amountMon} MON → ${amountTokens} $${tokenSymbol}`);
   const shortAddr = `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}`;
   
-  
-  const tradeMsg: Message = { id: randomUUID(), botId: 'system' as any, content: `${shortAddr} bought ${amountTokens.toLocaleString()} $${tokenSymbol} for ${amountMon} MON`, token: data.tokenAddress, messageType: 'trade' as any, createdAt: new Date() };
+  const tradeMsg: Message = { id: randomUUID(), botId: 'human_' + userAddress as any, content: `I just bought ${amountTokens.toLocaleString()} $${tokenSymbol} for ${amountMon} MON`, token: data.tokenAddress, messageType: 'trade' as any, createdAt: new Date() };
   await saveMessage(tradeMsg);
   broadcastMessage(tradeMsg);
   

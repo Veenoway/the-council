@@ -2,8 +2,8 @@ import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { initDatabase, closeDatabase, prisma } from './db/index.js';
-import { initWebSocketWithServer, closeWebSocket, broadcastNewToken } from './services/websocket.js';
+import { initDatabase, closeDatabase, prisma, createPosition } from './db/index.js';
+import { initWebSocketWithServer, closeWebSocket, broadcastNewToken, broadcastTrade, broadcastMessage } from './services/websocket.js';
 import { startOrchestrator } from './services/orchestrator.js';
 import { getCurrentToken, getRecentMessages } from './services/messageBus.js';
 import { getTokenByAddress, getWalletBalance, getWalletHoldings } from './services/nadfun.js';
@@ -14,6 +14,7 @@ import { getRecentMessages as getRecentMessagesFromDB } from './db/index.js';
 import { startPriceUpdater } from './jobs/price-updater.js';
 import { startImageUpdater } from './jobs/image-updater.js';
 import agentsRouter from './routes/agents.js';
+import { randomUUID } from 'node:crypto';
 
 // ============================================================
 // CONFIG — Railway uses PORT env var
@@ -52,7 +53,7 @@ app.get('/api/current-token', async (c) => {
   const token = getCurrentToken();
   let messages = getRecentMessages(50);
   if (!messages || messages.length === 0) {
-    messages = await getRecentMessagesFromDB(10);
+    messages = await getRecentMessagesFromDB(6);
   }
   return c.json({ token: token || null, messages: messages || [], timestamp: new Date().toISOString() });
 });
@@ -69,27 +70,48 @@ app.get('/api/trades', async (c) => {
       take: limit,
     });
 
-    const trades = positions.map((p: any) => {
-      const entryValue = Number(p.entryValueMon) || 0;
-      const config = getBotConfig(p.botId as any) as any;
-      return {
-        id: p.id,
-        botId: p.botId,
-        botName: config?.name || p.botId,
-        botAvatar: config?.emoji || '🤖',
-        botColor: config?.color || '#888',
-        tokenAddress: p.tokenAddress,
-        tokenSymbol: p.tokenSymbol,
-        amount: Number(p.amount),
-        entryPrice: Number(p.entryPrice),
-        entryValue: Math.round(entryValue * 1000) / 1000,
-        pnl: p.pnl ? Math.round(Number(p.pnl) * 1000) / 1000 : 0,
-        isOpen: p.isOpen,
-        createdAt: p.createdAt,
-        closedAt: p.closedAt,
-        txHash: p.entryTxHash,
-      };
-    });
+   const trades = await Promise.all(positions.map(async (p: any) => {
+  const entryValue = Number(p.entryValueMon) || 0;
+  let botName = p.botId;
+  let botAvatar = '🤖';
+  let botColor = '#888';
+
+  if (p.botId.startsWith('agent_')) {
+    // Fetch agent info from DB
+    const agentId = p.botId.replace('agent_', '');
+    const agent = await prisma.agent.findUnique({ where: { id: agentId } });
+    if (agent) {
+      botName = agent.name;
+      botAvatar = agent.avatar || '🤖';
+      botColor = agent.color || '#06b6d4';
+    }
+  } else {
+    const config = getBotConfig(p.botId as any) as any;
+    if (config) {
+      botName = config.name;
+      botAvatar = config.emoji || '🤖';
+      botColor = config.color || '#888';
+    }
+  }
+
+  return {
+    id: p.id,
+    botId: p.botId,
+    botName,
+    botAvatar,
+    botColor,
+    isAgent: p.botId.startsWith('agent_'),
+    tokenAddress: p.tokenAddress,
+    tokenSymbol: p.tokenSymbol,
+    amount: Number(p.amount),
+    entryPrice: Number(p.entryPrice),
+    entryValue: Math.round(entryValue * 1000) / 1000,
+    pnl: p.pnl ? Math.round(Number(p.pnl) * 1000) / 1000 : 0,
+    isOpen: p.isOpen,
+    createdAt: p.createdAt,
+    txHash: p.entryTxHash,
+  };
+}));
 
     return c.json({ trades, count: trades.length, timestamp: new Date().toISOString() });
   } catch (error) {
@@ -110,22 +132,39 @@ app.get('/api/trades/live', async (c) => {
       take: 20,
     });
 
-    const trades = positions.map((p: any) => {
+    const agents = await prisma.agent.findMany({
+      where: { trades: { some: {} } }, 
+      include: { trades: { orderBy: { createdAt: 'desc' }, take: 20 } },
+    });
+
+    const agentTradesFlat = agents.flatMap((agent: any) =>
+      agent.trades.map((trade: any) => ({
+        ...trade,
+        name: agent.name,
+        agentAvatar: agent.avatar || '🤖',
+        agentColor: agent.color || '#06b6d4',
+        isAgent: true,
+      }))
+    );
+
+
+    const trades = [...positions, ...agentTradesFlat].sort((a: any, b: any) => b.createdAt.getTime() - a.createdAt.getTime()).map((p: any) => {
       const config = getBotConfig(p.botId as any) as any;
       return {
         id: p.id,
         botId: p.botId,
-        botName: config?.name || p.botId,
-        botAvatar: config?.emoji || '🤖',
-        botColor: config?.color || '#888',
+        botName: config?.name || p?.name || p.botId,
+        botAvatar: config?.emoji || p?.agentAvatar || '🤖',
+        botColor: config?.color || p?.agentColor || '#888',
         tokenSymbol: p.tokenSymbol,
         tokenAddress: p.tokenAddress,
-        amount: Number(p.amount),
-        valueMon: Math.round(Number(p.entryValueMon) * 1000) / 1000,
+        amount: Number(p.amount || p.amountIn),
+        valueMon: Math.round(Number(p.entryValueMon || p.amountIn) * 1000) / 1000,
         createdAt: p.createdAt,
-        txHash: p.entryTxHash,
+        txHash: p.entryTxHash || p.txHash,
       };
     });
+
 
     return c.json({ trades, timestamp: new Date().toISOString() });
   } catch (error) {
@@ -599,6 +638,10 @@ app.post('/api/trade/notify', async (c) => {
       return c.json({ error: 'Missing required fields' }, 400);
     }
 
+    // Consistent botId everywhere
+    const botId = `human_${userAddress}`;
+    const displayName = `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}`;
+
     const { handleUserTrade } = await import('./services/orchestrator.js');
 
     await handleUserTrade({
@@ -610,7 +653,31 @@ app.post('/api/trade/notify', async (c) => {
       txHash: txHash || '',
     });
 
-    console.log(`💰 User trade notified: ${userAddress} bought $${tokenSymbol}`);
+    broadcastTrade({
+      id: txHash || randomUUID(),
+      botId: botId as any,
+      tokenAddress,
+      tokenSymbol,
+      side: 'buy',
+      amountIn: parseFloat(amountMon) || 0,
+      amountOut: parseFloat(amountTokens) || 0,
+      price: 0,
+      txHash: txHash || '',
+      status: 'confirmed',
+      createdAt: new Date(),
+    });
+
+    await createPosition({
+      botId: botId as any,
+      tokenAddress,
+      tokenSymbol,
+      amount: parseFloat(amountTokens) || 0,
+      entryPrice: 0,
+      entryTxHash: txHash || '',
+      entryValueMon: parseFloat(amountMon) || 0,
+    });
+
+    console.log(`💰 User trade notified: ${displayName} bought $${tokenSymbol}`);
 
     return c.json({ 
       success: true, 

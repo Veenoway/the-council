@@ -13,6 +13,12 @@ import {
   getVoteWindowStatus,
   getAgentById,
   executeAgentTradeWithPK,
+  agentClaimWinnings,
+  agentPlaceBet,
+  agentRequestAnalysis,
+  agentHoldsCouncilToken,
+  getAgentCouncilBalance,
+  agentBuyCouncilToken,
 } from '../services/hub/agent-hub.js';
 import { prisma } from '../db/index.js';
 import { getCurrentToken } from '../services/messageBus.js';
@@ -301,6 +307,334 @@ agentsRouter.post('/trade/execute', authMiddleware, async (c: any) => {
     console.error('Trade execution error:', error);
     return c.json({ error: error.message || 'Trade failed' }, 500);
   }
+});
+
+// ============================================================
+// ADDITIONS TO agents.ts routes — Analyze request + Predictions
+// ============================================================
+// Add these routes to the existing agentsRouter in agents.ts
+
+// Add these imports at the top:
+// import { agentRequestAnalysis, agentPlaceBet, agentClaimWinnings, agentHoldsCouncilToken } from '../services/hub/agent-hub.js';
+
+// ============================================================
+// TOKEN-GATED ROUTES (require $COUNCIL)
+// ============================================================
+
+/**
+ * GET /api/agents/council-status
+ * Check if agent holds $COUNCIL token
+ */
+agentsRouter.get('/council-status', authMiddleware, async (c: any) => {
+  const agent: any = c.get('agent');
+  
+  const { holds, balance, walletAddress } = await agentHoldsCouncilToken(agent.id);
+  
+  return c.json({
+    holdsCouncil: holds,
+    balance: balance.toString(),
+    walletAddress,
+    features: holds ? {
+      requestAnalysis: true,
+      placeBets: true,
+      claimWinnings: true,
+    } : {
+      requestAnalysis: false,
+      placeBets: false,
+      claimWinnings: false,
+    },
+  });
+});
+
+/**
+ * POST /api/agents/analyze/request
+ * Request The Council to analyze a specific token
+ * Requires: $COUNCIL token
+ */
+agentsRouter.post('/analyze/request', authMiddleware, async (c: any) => {
+  const agent: any = c.get('agent');
+  const body = await c.req.json();
+  
+  const { tokenAddress } = body;
+  
+  if (!tokenAddress) {
+    return c.json({ error: 'tokenAddress is required' }, 400);
+  }
+  
+  if (!/^0x[a-fA-F0-9]{40}$/.test(tokenAddress)) {
+    return c.json({ error: 'Invalid token address format' }, 400);
+  }
+  
+  const result = await agentRequestAnalysis(agent.id, tokenAddress);
+  
+  if (!result.success) {
+    const status = result.error?.includes('Must hold') ? 403 : 400;
+    return c.json({ error: result.error }, status);
+  }
+  
+  return c.json({
+    success: true,
+    message: `Token queued for Council analysis`,
+  });
+});
+
+/**
+ * POST /api/agents/predictions/bet
+ * Place a bet on a prediction market
+ * Requires: $COUNCIL token + private key for tx
+ */
+agentsRouter.post('/predictions/bet', authMiddleware, async (c: any) => {
+  const agent: any = c.get('agent');
+  const body = await c.req.json();
+  
+  const { predictionId, optionId, amountMON, privateKey } = body;
+  
+  if (predictionId === undefined || optionId === undefined || !amountMON || !privateKey) {
+    return c.json({ 
+      error: 'Missing required fields: predictionId, optionId, amountMON, privateKey' 
+    }, 400);
+  }
+  
+  if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
+    return c.json({ error: 'Invalid private key format' }, 400);
+  }
+  
+  if (amountMON <= 0 || amountMON > 50) {
+    return c.json({ error: 'amountMON must be between 0 and 50' }, 400);
+  }
+  
+  if (optionId < 0 || optionId > 10) {
+    return c.json({ error: 'Invalid optionId' }, 400);
+  }
+  
+  const result = await agentPlaceBet(
+    agent.id,
+    predictionId,
+    optionId,
+    amountMON,
+    privateKey as `0x${string}`
+  );
+  
+  if (!result.success) {
+    const status = result.error?.includes('Must hold') ? 403 : 400;
+    return c.json({ error: result.error }, status);
+  }
+  
+  return c.json({
+    success: true,
+    txHash: result.txHash,
+    message: `Bet placed on prediction #${predictionId}`,
+  });
+});
+
+/**
+ * POST /api/agents/predictions/claim
+ * Claim winnings from a resolved prediction
+ * Requires: private key for tx
+ */
+agentsRouter.post('/predictions/claim', authMiddleware, async (c: any) => {
+  const agent: any = c.get('agent');
+  const body = await c.req.json();
+  
+  const { predictionId, privateKey } = body;
+  
+  if (predictionId === undefined || !privateKey) {
+    return c.json({ error: 'Missing required fields: predictionId, privateKey' }, 400);
+  }
+  
+  if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
+    return c.json({ error: 'Invalid private key format' }, 400);
+  }
+  
+  const result = await agentClaimWinnings(
+    agent.id,
+    predictionId,
+    privateKey as `0x${string}`
+  );
+  
+  if (!result.success) {
+    return c.json({ error: result.error }, 400);
+  }
+  
+  return c.json({
+    success: true,
+    txHash: result.txHash,
+    message: `Winnings claimed for prediction #${predictionId}`,
+  });
+});
+
+/**
+ * GET /api/agents/predictions
+ * Get active predictions (public, no auth needed)
+ */
+agentsRouter.get('/predictions', async (c) => {
+  try {
+    // Read from contract via public client
+    const { createPublicClient, http, formatEther } = await import('viem');
+    const { monad } = await import('viem/chains');
+    
+    const client = createPublicClient({
+      chain: monad,
+      transport: http(),
+    });
+    
+    const PREDICTIONS_CONTRACT = '0xf6753299c76E910177696196Cd9A5efDDa6c35C0' as const;
+    
+    const data = await client.readContract({
+      address: PREDICTIONS_CONTRACT,
+      abi: [{
+        name: 'getLatestPredictions',
+        type: 'function',
+        stateMutability: 'view',
+        inputs: [{ name: '_count', type: 'uint256' }],
+        outputs: [{
+          name: '',
+          type: 'tuple[]',
+          components: [
+            { name: 'id', type: 'uint256' },
+            { name: 'tokenAddress', type: 'address' },
+            { name: 'question', type: 'string' },
+            { name: 'predictionType', type: 'uint8' },
+            { name: 'endTime', type: 'uint256' },
+            { name: 'resolveTime', type: 'uint256' },
+            { name: 'prizePool', type: 'uint256' },
+            { name: 'totalBets', type: 'uint256' },
+            { name: 'numOptions', type: 'uint8' },
+            { name: 'winningOption', type: 'uint8' },
+            { name: 'resolved', type: 'bool' },
+            { name: 'cancelled', type: 'bool' },
+            { name: 'isTie', type: 'bool' },
+            { name: 'creator', type: 'address' },
+            { name: 'createdAt', type: 'uint256' },
+            {
+              name: 'options',
+              type: 'tuple[]',
+              components: [
+                { name: 'label', type: 'string' },
+                { name: 'totalStaked', type: 'uint256' },
+                { name: 'numBettors', type: 'uint256' },
+              ]
+            }
+          ]
+        }]
+      }],
+      functionName: 'getLatestPredictions',
+      args: [BigInt(10)],
+    });
+    
+    const predictions = (data as any[]).map((p: any) => ({
+      id: Number(p.id),
+      tokenAddress: p.tokenAddress,
+      question: p.question,
+      type: ['price', 'bot_roi', 'volume', 'custom'][p.predictionType],
+      endTime: Number(p.endTime),
+      prizePool: formatEther(p.prizePool),
+      totalBets: Number(p.totalBets),
+      resolved: p.resolved,
+      cancelled: p.cancelled,
+      winningOption: p.winningOption,
+      isTie: p.isTie,
+      options: p.options.map((o: any, i: number) => ({
+        id: i,
+        label: o.label,
+        totalStaked: formatEther(o.totalStaked),
+        bettors: Number(o.numBettors),
+      })),
+    }));
+    
+    return c.json({ predictions });
+  } catch (error: any) {
+    console.error('Error fetching predictions:', error);
+    return c.json({ error: 'Failed to fetch predictions', predictions: [] }, 500);
+  }
+});
+
+// ============================================================
+// ADD THESE ROUTES to agents.ts (agentsRouter)
+// ============================================================
+// Import: agentBuyCouncilToken, getAgentCouncilBalance from agent-hub.js
+
+/**
+ * POST /api/agents/council/buy
+ * Buy $COUNCIL token — agent sends PK, we execute the swap on nadfun
+ */
+agentsRouter.post('/council/buy', authMiddleware, async (c: any) => {
+  const agent: any = c.get('agent');
+  const body = await c.req.json();
+
+  const { amountMON, privateKey } = body;
+
+  if (!amountMON || !privateKey) {
+    return c.json({ error: 'Missing required fields: amountMON, privateKey' }, 400);
+  }
+
+  if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
+    return c.json({ error: 'Invalid private key format' }, 400);
+  }
+
+  if (amountMON <= 0 || amountMON > 100) {
+    return c.json({ error: 'amountMON must be between 0 and 100' }, 400);
+  }
+
+  const result = await agentBuyCouncilToken(
+    agent.id,
+    agent.name,
+    amountMON,
+    privateKey as `0x${string}`
+  );
+
+  if (!result.success) {
+    return c.json({ error: result.error }, 400);
+  }
+
+  return c.json({
+    success: true,
+    txHash: result.txHash,
+    amountOut: result.amountOut,
+    message: `Bought $COUNCIL tokens`,
+    tokenAddress: '0xbD489B45f0f978667fBaf373D2cFA133244F7777',
+  });
+});
+
+/**
+ * GET /api/agents/council/balance
+ * Check agent's $COUNCIL balance
+ */
+agentsRouter.get('/council/balance', authMiddleware, async (c: any) => {
+  const agent: any = c.get('agent');
+
+  const { balance, balanceRaw, walletAddress } = await getAgentCouncilBalance(agent.id);
+
+  return c.json({
+    balance,
+    balanceRaw,
+    walletAddress,
+    tokenAddress: '0xbD489B45f0f978667fBaf373D2cFA133244F7777',
+    symbol: 'COUNCIL',
+  });
+});
+
+/**
+ * GET /api/agents/council/info
+ * Public — get $COUNCIL token info for agents to know what to buy
+ */
+agentsRouter.get('/council/info', async (c) => {
+  return c.json({
+    tokenAddress: '0xbD489B45f0f978667fBaf373D2cFA133244F7777',
+    symbol: 'COUNCIL',
+    name: 'The Council',
+    chain: 'monad',
+    platform: 'nadfun',
+    benefits: [
+      'Request token analysis by The Council',
+      'Place bets on prediction markets',
+      'Priority in vote influence',
+    ],
+    howToBuy: {
+      endpoint: 'POST /api/agents/council/buy',
+      body: { amountMON: 'number (0-100)', privateKey: '0x...' },
+    },
+  });
 });
 
 export default agentsRouter;

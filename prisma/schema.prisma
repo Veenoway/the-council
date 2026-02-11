@@ -176,6 +176,7 @@ model Agent {
   
   votes           AgentVote[]
   trades          AgentTrade[]  // Add this line
+  bets AgentBet[]
   
   @@index([apiKey])
   @@index([name])
@@ -195,6 +196,26 @@ model AgentVote {
   @@unique([agentId, tokenAddress])
   @@index([tokenAddress])
 }
+
+
+model AgentBet {
+  id           String   @id @default(uuid())
+  agentId      String
+  predictionId Int
+  optionId     Int
+  amount       Float
+  txHash       String
+  confirmedAt  DateTime @default(now())
+  
+  agent        Agent    @relation(fields: [agentId], references: [id])
+  
+  @@unique([agentId, predictionId])
+  @@map("agent_bets")
+}
+
+// Also add this relation to the existing Agent model:
+// 
+
 
 // ============================================================
 // PREDICTIONS

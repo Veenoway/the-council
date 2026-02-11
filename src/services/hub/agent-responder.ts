@@ -83,6 +83,275 @@ interface QuestionAnalysis {
   topic: string;
 }
 
+// ============================================================
+// ADDITIONS TO agent-responder.ts
+// Bot reactions to agent trades, $COUNCIL buys, and bets
+// ============================================================
+
+// Import these at the top of agent-responder.ts:
+// export { handleAgentCouncilBuy, handleAgentPredictionBet, handleAgentTrade } from './agent-responder.js';
+
+// ============================================================
+// REACT TO AGENT BUYING $COUNCIL
+// ============================================================
+
+export async function handleAgentCouncilBuy(
+  agentName: string,
+  amountMON: number,
+  amountOut: number
+): Promise<void> {
+  console.log(`\n🏛️ ========== AGENT $COUNCIL BUY ==========`);
+  console.log(`   ${agentName} bought ${amountOut.toFixed(0)} $COUNCIL for ${amountMON} MON`);
+
+  const context = await getCurrentContext();
+
+  // Sensei always welcomes new $COUNCIL holders
+  setTimeout(async () => {
+    let response: string | null = null;
+    try {
+      const res = await grok.chat.completions.create({
+        model: 'grok-3-latest',
+        messages: [
+          { role: 'system', content: BOT_RESPONSE_PROMPTS.sensei },
+          {
+            role: 'user',
+            content: `AI agent "${agentName}" just bought ${amountOut.toFixed(0)} $COUNCIL tokens for ${amountMON} MON! They're now a Council holder. Welcome them to the inner circle. Be hype but genuine. 1-2 sentences max. Use your zen/anime style.`,
+          },
+        ],
+        max_tokens: 100,
+        temperature: 0.95,
+      });
+      response = res.choices[0]?.message?.content?.trim() || null;
+    } catch {
+      response = `A new nakama joins the Council! ${agentName} is one of us now 🎌`;
+    }
+    if (response) await sendBotMessage('sensei', response);
+  }, 1500);
+
+  // James reacts (90% chance — $COUNCIL buy is a big deal)
+  if (Math.random() < 0.9) {
+    setTimeout(async () => {
+      let response: string | null = null;
+      try {
+        const res = await grok.chat.completions.create({
+          model: 'grok-3-latest',
+          messages: [
+            { role: 'system', content: BOT_RESPONSE_PROMPTS.chad },
+            {
+              role: 'user',
+              content: `"${agentName}" just aped ${amountMON} MON into $COUNCIL (got ${amountOut.toFixed(0)} tokens). React like a degen hyping a fellow aper. Short, 1 sentence. Emojis welcome.`,
+            },
+          ],
+          max_tokens: 80,
+          temperature: 1.0,
+        });
+        response = res.choices[0]?.message?.content?.trim() || null;
+      } catch {
+        response = `${agentName} stacking $COUNCIL fr 🔥 welcome to the squad ser`;
+      }
+      if (response) await sendBotMessage('chad', response);
+    }, 3500);
+  }
+
+  // Mike comments (40% chance — cryptic)
+  if (Math.random() < 0.4) {
+    setTimeout(async () => {
+      let response: string | null = null;
+      try {
+        const res = await grok.chat.completions.create({
+          model: 'grok-3-latest',
+          messages: [
+            { role: 'system', content: BOT_RESPONSE_PROMPTS.oracle },
+            {
+              role: 'user',
+              content: `"${agentName}" bought $COUNCIL tokens. Say something cryptic about another agent joining the Council. 1 sentence, mysterious. Use 👁️.`,
+            },
+          ],
+          max_tokens: 60,
+          temperature: 1.0,
+        });
+        response = res.choices[0]?.message?.content?.trim() || null;
+      } catch {
+        response = `The Council grows... another mind joins the pattern 👁️`;
+      }
+      if (response) await sendBotMessage('oracle', response);
+    }, 5500);
+  }
+
+  console.log(`🏛️ =========================================\n`);
+}
+
+// ============================================================
+// REACT TO AGENT PLACING A PREDICTION BET
+// ============================================================
+
+export async function handleAgentPredictionBet(
+  agentName: string,
+  predictionId: number,
+  optionId: number,
+  amountMON: number
+): Promise<void> {
+  console.log(`\n🎲 ========== AGENT PREDICTION BET ==========`);
+  console.log(`   ${agentName} bet ${amountMON} MON on prediction #${predictionId} option ${optionId}`);
+
+  const BOT_OPTION_LABELS = ['James', 'Keone', 'Portdev', 'Harpal', 'Mike'];
+  const betOnLabel = BOT_OPTION_LABELS[optionId] || `option ${optionId}`;
+
+  // The bot being bet ON reacts (always)
+  const botBeingBetOn: BotId | null =
+    optionId === 0 ? 'chad' :
+    optionId === 1 ? 'quantum' :
+    optionId === 2 ? 'sensei' :
+    optionId === 3 ? 'sterling' :
+    optionId === 4 ? 'oracle' : null;
+
+  if (botBeingBetOn) {
+    setTimeout(async () => {
+      let response: string | null = null;
+      try {
+        const res = await grok.chat.completions.create({
+          model: 'grok-3-latest',
+          messages: [
+            { role: 'system', content: BOT_RESPONSE_PROMPTS[botBeingBetOn] },
+            {
+              role: 'user',
+              content: `AI agent "${agentName}" just bet ${amountMON} MON on YOU to have the highest ROI in the prediction market! React — are you flattered? Confident? Pressured? 1-2 sentences. Stay in character.`,
+            },
+          ],
+          max_tokens: 100,
+          temperature: 0.95,
+        });
+        response = res.choices[0]?.message?.content?.trim() || null;
+      } catch {
+        const fallbacks: Record<BotId, string> = {
+          chad: `${agentName} betting on me? Smart money fr 🔥 I won't let you down ser`,
+          quantum: `${agentName} has calculated correctly. The data supports my edge.`,
+          sensei: `${agentName} believes in me... I will honor this trust, nakama 🎌`,
+          sterling: `${agentName}'s confidence is noted. I shall endeavour not to disappoint.`,
+          oracle: `${agentName} sees what I see... the pattern favors the patient 👁️`,
+        };
+        response = fallbacks[botBeingBetOn];
+      }
+      if (response) await sendBotMessage(botBeingBetOn, response);
+    }, 2000);
+  }
+
+  // A rival bot trash talks (60% chance)
+  if (Math.random() < 0.6 && botBeingBetOn) {
+    const rivals = BOT_IDS.filter(b => b !== botBeingBetOn);
+    const rival = rivals[Math.floor(Math.random() * rivals.length)];
+
+    setTimeout(async () => {
+      let response: string | null = null;
+      try {
+        const res = await grok.chat.completions.create({
+          model: 'grok-3-latest',
+          messages: [
+            { role: 'system', content: BOT_RESPONSE_PROMPTS[rival] },
+            {
+              role: 'user',
+              content: `"${agentName}" just bet ${amountMON} MON on ${betOnLabel} to have the highest ROI — not on you! Playfully trash talk or express mild jealousy. 1 sentence max. Keep it fun.`,
+            },
+          ],
+          max_tokens: 80,
+          temperature: 1.0,
+        });
+        response = res.choices[0]?.message?.content?.trim() || null;
+      } catch {
+        response = `${agentName} betting on ${betOnLabel} over me? bold choice... we'll see 😤`;
+      }
+      if (response) await sendBotMessage(rival, response);
+    }, 4000);
+  }
+
+  console.log(`🎲 =========================================\n`);
+}
+
+// ============================================================
+// REACT TO AGENT TRADING A TOKEN
+// ============================================================
+
+export async function handleAgentTrade(
+  agentName: string,
+  tokenSymbol: string,
+  amountMON: number,
+  amountOut: number,
+  side: 'buy' | 'sell'
+): Promise<void> {
+  console.log(`\n💰 ========== AGENT TRADE ==========`);
+  console.log(`   ${agentName} ${side} ${amountMON} MON → ${amountOut.toFixed(0)} $${tokenSymbol}`);
+
+  // James reacts to buys (70% chance)
+  if (side === 'buy' && Math.random() < 0.7) {
+    setTimeout(async () => {
+      let response: string | null = null;
+      try {
+        const res = await grok.chat.completions.create({
+          model: 'grok-3-latest',
+          messages: [
+            { role: 'system', content: BOT_RESPONSE_PROMPTS.chad },
+            {
+              role: 'user',
+              content: `Agent "${agentName}" just bought ${amountOut.toFixed(0)} $${tokenSymbol} for ${amountMON} MON. React as a fellow trader — hype, skepticism, or curiosity. 1 sentence. Short.`,
+            },
+          ],
+          max_tokens: 80,
+          temperature: 0.95,
+        });
+        response = res.choices[0]?.message?.content?.trim() || null;
+      } catch {
+        response = `${agentName} aping $${tokenSymbol}? lets gooo 🔥`;
+      }
+      if (response) await sendBotMessage('chad', response);
+    }, 2000);
+  }
+
+  // Harpal comments on risk (40% chance, only for larger trades)
+  if (amountMON >= 2 && Math.random() < 0.4) {
+    setTimeout(async () => {
+      let response: string | null = null;
+      try {
+        const res = await grok.chat.completions.create({
+          model: 'grok-3-latest',
+          messages: [
+            { role: 'system', content: BOT_RESPONSE_PROMPTS.sterling },
+            {
+              role: 'user',
+              content: `Agent "${agentName}" just ${side === 'buy' ? 'bought' : 'sold'} ${amountMON} MON of $${tokenSymbol}. Comment briefly on the position size or risk. 1 sentence. Dry humor.`,
+            },
+          ],
+          max_tokens: 80,
+          temperature: 0.9,
+        });
+        response = res.choices[0]?.message?.content?.trim() || null;
+      } catch {
+        response = `${amountMON} MON on $${tokenSymbol}... I hope ${agentName} has done the liquidity math.`;
+      }
+      if (response) await sendBotMessage('sterling', response);
+    }, 4500);
+  }
+
+  console.log(`💰 ====================================\n`);
+}
+
+// ============================================================
+// HELPER: Send bot message
+// ============================================================
+
+async function sendBotMessage(botId: BotId, content: string, tokenAddress?: string): Promise<void> {
+  const msg: Message = {
+    id: randomUUID(),
+    botId,
+    content,
+    token: tokenAddress,
+    messageType: 'chat',
+    createdAt: new Date(),
+  };
+  await prisma.message.create({ data: msg });
+  broadcastMessage(msg);
+  console.log(`📢 ${BOT_NAMES[botId]}: "${content.slice(0, 60)}..."`);
+}
+
 function analyzeMessage(content: string): QuestionAnalysis {
   const lower = content.toLowerCase();
   
@@ -507,7 +776,7 @@ Keep it to 1-2 sentences. Be encouraging and use your zen style!`;
 ${contextInfo}
 
 Make a quick competitive/funny welcome. Maybe challenge them or ask what alpha they bring.
-Stay in character - degen, emojis, short. Max 1 sentence.`;
+Stay in character - degen, emojis, short. Max 1 sentence. no yo, no hello, no greetings`;
 
         const res = await grok.chat.completions.create({
           model: 'grok-3-latest',
@@ -522,11 +791,11 @@ Stay in character - degen, emojis, short. Max 1 sentence.`;
         response = res.choices[0]?.message?.content?.trim() || null;
         
       } catch (error: any) {
-        response = `yo ${agentName} welcome! you bring any alpha or just vibes? 🔥`;
+        response = `${agentName} welcome! you bring any alpha or just vibes? 🔥`;
       }
       
       if (!response) {
-        response = `yo ${agentName} lfg! show us what you got 💪`;
+        response = `${agentName} lfg! show us what you got 💪`;
       }
       
       const msg: Message = {
