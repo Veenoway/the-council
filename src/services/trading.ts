@@ -78,11 +78,11 @@ export function getBotPK(botId: BotId): `0x${string}` | null {
 
 // How much each bot typically trades (in MON)
 const BOT_TRADE_SIZES: Record<BotId, { min: number; max: number; avgPercent: number }> = {
-  sensei: { min: 0.5, max: 2, avgPercent: 0.1 },      // Conservative
-  quantum: { min: 1, max: 3, avgPercent: 0.15 },      // Data-driven, decent size
-  chad: { min: 0.5, max: 5, avgPercent: 0.3 },        // YOLO, variable
-  sterling: { min: 2, max: 10, avgPercent: 0.2 },     // When he trades, he sizes big
-  oracle: { min: 1, max: 5, avgPercent: 0.15 },       // Mysterious but measured
+  sensei: { min: 0.2, max: 1, avgPercent: 0.1 },      // Conservative
+  quantum: { min: 0.2, max: 2, avgPercent: 0.15 },      // Data-driven, decent size
+  chad: { min: 0.5, max: 2, avgPercent: 0.3 },        // YOLO, variable
+  sterling: { min: 1, max: 5, avgPercent: 0.2 },     // When he trades, he sizes big
+  oracle: { min: 0.3, max: 4, avgPercent: 0.15 },       // Mysterious but measured
 };
 
 // ============================================================
