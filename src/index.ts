@@ -1054,6 +1054,17 @@ app.post("/api/trade/notify", async (c) => {
   }
 });
 
+app.post("/api/twitter/recap", async (c) => {
+  try {
+    const { runDailyRecap } = await import("./jobs/daily-recap.js");
+    await runDailyRecap();
+    return c.json({ success: true, message: "Daily recap posted" });
+  } catch (error) {
+    console.error("Error posting recap:", error);
+    return c.json({ error: "Failed to post recap" }, 500);
+  }
+});
+
 // ============================================================
 // MAIN — Combined HTTP + WebSocket on same port for Railway
 // ============================================================
