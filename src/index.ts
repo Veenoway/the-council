@@ -53,7 +53,7 @@ app.get('/api/current-token', async (c) => {
   const token = getCurrentToken();
   let messages = getRecentMessages(50);
   if (!messages || messages.length === 0) {
-    messages = await getRecentMessagesFromDB(6);
+     messages = await getRecentMessagesFromDB(50);
   }
   return c.json({ token: token || null, messages: messages || [], timestamp: new Date().toISOString() });
 });
