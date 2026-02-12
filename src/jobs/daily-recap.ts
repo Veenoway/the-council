@@ -10,37 +10,29 @@ import { getWalletHoldings } from "../services/nadfun.js";
 import { getBotWallet } from "../services/trading.js";
 import OpenAI from "openai";
 
-const BOT_DISPLAY: Record<
-  string,
-  { name: string; emoji: string; personality: string }
-> = {
+const BOT_DISPLAY: Record<string, { name: string; personality: string }> = {
   chad: {
     name: "James",
-    emoji: "🦍",
     personality:
       "CT degen energy, uses slang like 'fr', 'ngl', 'ser'. Gets hyped but keeps it real. Talks like a trader on crypto twitter.",
   },
   quantum: {
     name: "Keone",
-    emoji: "🤓",
     personality:
       "Pure data nerd. References numbers, RSI, percentages. Precise and analytical but not boring. Dry humor.",
   },
   sensei: {
     name: "Portdev",
-    emoji: "🎌",
     personality:
       "Community-focused, zen vibes, occasional anime references. Believes in diamond hands and organic growth.",
   },
   sterling: {
     name: "Harpal",
-    emoji: "💼",
     personality:
       "Risk manager. Cautious, worst-case thinker. Blunt about bad trades. Protective of the treasury.",
   },
   oracle: {
     name: "Mike",
-    emoji: "🔮",
     personality:
       "Cryptic and contrarian. Speaks in metaphors. Sees patterns others miss. Mysterious but insightful.",
   },
@@ -58,7 +50,6 @@ interface DailyStats {
   botPerformances: {
     botId: string;
     name: string;
-    emoji: string;
     trades: number;
     pnlMon: number;
     winRate: number;
@@ -103,7 +94,7 @@ export async function gatherDailyStats(): Promise<DailyStats> {
 
   const botPerformances = await Promise.all(
     ALL_BOT_IDS.map(async (botId) => {
-      const display = BOT_DISPLAY[botId] || { name: botId, emoji: "🤖" };
+      const display = BOT_DISPLAY[botId] || { name: botId };
       const botPositions = positionsToday.filter((p: any) => p.botId === botId);
 
       const tokenAddresses = [
@@ -149,7 +140,6 @@ export async function gatherDailyStats(): Promise<DailyStats> {
       return {
         botId,
         name: display.name,
-        emoji: display.emoji,
         trades: botPositions.length,
         pnlMon: Math.round(totalPnlMon * 1000) / 1000,
         winRate:
@@ -219,7 +209,7 @@ export async function generateBotTweet(stats: DailyStats): Promise<string> {
   const leaderboardStr = leaderboard
     .map(
       (b, i) =>
-        `${i + 1}. ${b.emoji} ${b.name}: ${b.trades} trades, ${b.pnlMon >= 0 ? "+" : ""}${b.pnlMon} MON, ${b.winRate}% WR`,
+        `${i + 1}. ${b.name}: ${b.trades} trades, ${b.pnlMon >= 0 ? "+" : ""}${b.pnlMon} MON, ${b.winRate}% WR`,
     )
     .join("\n");
 
@@ -260,7 +250,7 @@ YOUR OWN PERFORMANCE:
 - You're ranked #${ownRank || "?"} today
 
 RULES:
-- Start with: "Gmonad, ${bot.name} from The Apostate here ${bot.emoji}"
+- Start with: "Gmonad, ${bot.name} from The Apostate here"
 - MUST be under 270 characters total
 - Use line breaks (\\n) to separate ideas — make it visually clean and readable
 - Write in YOUR voice and personality
@@ -310,7 +300,7 @@ export function formatFallbackTweet(stats: DailyStats): string {
   tweet += `${stats.totalTrades} trades | ${stats.totalVolumeMon} MON volume\n\n`;
 
   if (leaderboard.length > 0) {
-    tweet += `👑 ${leaderboard[0].emoji} ${leaderboard[0].name} led with +${leaderboard[0].pnlMon} MON\n`;
+    tweet += `👑 ${leaderboard[0].name} led with +${leaderboard[0].pnlMon} MON\n`;
   }
   tweet += `\nTotal AUM: ${stats.totalAUM} MON`;
 
