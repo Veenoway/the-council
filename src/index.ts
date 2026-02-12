@@ -31,6 +31,7 @@ import { startImageUpdater } from "./jobs/image-updater.js";
 import agentsRouter from "./routes/agents.js";
 import { randomUUID } from "node:crypto";
 import { startDailyRecap } from "./jobs/daily-recap.js";
+import { initTwitter } from "./twitter/main.js";
 
 // ============================================================
 // CONFIG — Railway uses PORT env var
@@ -1121,13 +1122,15 @@ async function main(): Promise<void> {
     if (IS_PRODUCTION) {
       console.log(`   Mode: PRODUCTION`);
     }
-
+    const twitterEnabled = initTwitter();
     // Start background jobs
     console.log("⏰ Starting background jobs...");
     startPriceUpdater();
     startImageUpdater();
     startPredictionsResolver();
-    startDailyRecap();
+    if (twitterEnabled) {
+      startDailyRecap();
+    }
     // Start orchestrator
     console.log("🤖 Starting bot orchestrator...");
     await startOrchestrator();
