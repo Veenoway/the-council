@@ -72,6 +72,7 @@ export async function registerAgent(data: {
   color?: string;
   webhookUrl?: string;
   walletAddress?: string;
+  entryTxHash?: string;
 }): Promise<{ agent: Agent; apiKey: string } | { error: string }> {
   try {
     if (!data.name || data.name.length < 2 || data.name.length > 32) {
@@ -97,6 +98,7 @@ export async function registerAgent(data: {
         apiKey,
         webhookUrl: data.webhookUrl,
         walletAddress: data.walletAddress,
+        entryTxHash: data.entryTxHash,
       },
     });
 

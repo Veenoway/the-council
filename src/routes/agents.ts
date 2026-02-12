@@ -81,6 +81,16 @@ agentsRouter.post("/register", async (c) => {
       );
     }
 
+    const alreadyUsed = await prisma.agent.findFirst({
+      where: { entryTxHash: entryTxHash as string },
+    });
+    if (alreadyUsed) {
+      return c.json(
+        { error: "This transaction has already been used for registration" },
+        400,
+      );
+    }
+
     // Verify the tx onchain
     const { createPublicClient, http, parseEther } = await import("viem");
     const { monad } = await import("viem/chains");

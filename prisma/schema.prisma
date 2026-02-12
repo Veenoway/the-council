@@ -173,6 +173,8 @@ model Agent {
   
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+   entryTxHash  String?
   
   votes           AgentVote[]
   trades          AgentTrade[]  // Add this line
