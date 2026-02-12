@@ -390,6 +390,103 @@ app.get('/api/positions', async (c) => {
   }
 });
 
+// Add this to server.ts after the agents router section
+
+// ============================================================
+// TELEGRAM CHAT — Users talk to bots via Telegram
+// ============================================================
+
+app.post('/api/telegram/chat', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { message, username, targetBotId } = body;
+
+    if (!message) return c.json({ error: 'Message required' }, 400);
+
+    const { generateDiscussionResponse, generateBotResponse } = await import('./services/grok.js');
+    const { postMessage, getCurrentToken, getRecentMessages } = await import('./services/messageBus.js');
+    const { getBotConfig } = await import('./bots/personalities.js');
+
+    const displayName = username || 'anon';
+
+    // 1) Broadcast user message (frontend + TG relay both see it)
+    await postMessage(`tg_${displayName}` as any, message);
+
+    // 2) Pick which bot responds
+    let respondingBotId = targetBotId;
+
+    if (!respondingBotId || !getBotConfig(respondingBotId)) {
+      const weights = { chad: 0.35, quantum: 0.2, sensei: 0.2, sterling: 0.15, oracle: 0.1 };
+      const rand = Math.random();
+      let cumulative = 0;
+      for (const [botId, weight] of Object.entries(weights)) {
+        cumulative += weight;
+        if (rand < cumulative) {
+          respondingBotId = botId;
+          break;
+        }
+      }
+      respondingBotId = respondingBotId || 'chad';
+    }
+
+    const config = getBotConfig(respondingBotId as any);
+    if (!config) return c.json({ error: 'Bot not found' }, 404);
+
+    // 3) Build context from recent messages
+    const token = getCurrentToken();
+    const recentMessages = getRecentMessages(10);
+    const discussionHistory = recentMessages.map((m: any) => ({
+      botId: m.botId,
+      content: m.content,
+    }));
+
+    // 4) Generate bot response
+    let response: string;
+
+    if (token) {
+      response = await generateDiscussionResponse(
+        respondingBotId as any,
+        token,
+        discussionHistory,
+        0
+      );
+    } else {
+      response = await generateBotResponse(respondingBotId as any, {
+         currentToken: token,
+          recentMessages: discussionHistory as any,
+          positions: [],
+          event: {
+            type: 'new_message',
+            data: {
+              message: message,
+              username: displayName,
+              targetBotId: respondingBotId,
+            },
+          },
+      });
+    }
+
+    if (!response || response === '...' || response.trim() === '') {
+      response = "hmm lmk what u wanna know";
+    }
+
+    // 5) Broadcast bot response
+    await postMessage(respondingBotId as any, response);
+
+    console.log(`💬 TG @${displayName} → ${config.name}: "${response.slice(0, 50)}"`);
+
+    return c.json({
+      success: true,
+      botId: respondingBotId,
+      botName: config.name,
+      response,
+    });
+  } catch (error) {
+    console.error('Error in telegram chat:', error);
+    return c.json({ error: 'Failed to generate response' }, 500);
+  }
+});
+
 // ============================================================
 // BOTS
 // ============================================================
