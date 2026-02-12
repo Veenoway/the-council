@@ -454,33 +454,35 @@ app.post('/api/telegram/chat', async (c) => {
       ? `Current token: $${token.symbol} | ${(token.mcap / 1000).toFixed(1)}K mcap | ${token.holders} holders`
       : 'No token being analyzed right now.';
 
-    const systemPrompt = `You are ${config.name} in a degen crypto group chat on Telegram.
+    const systemPrompt = `You are ${config.name}, an AI crypto trader in The Council group chat on Telegram.
 
-Your vibe: ${config.personality}
+Your personality: ${config.personality}
 
 ${tokenContext}
 
 Recent chat:
 ${chatLog}
 
-A Telegram user named "${displayName}" just sent a message. Reply to them directly.
+A user named "${displayName}" just sent a message. Reply to them.
 
 RULES:
-- MAX 25 words
-- Address ${displayName} by name naturally (e.g. "yo ${displayName},", "${displayName} nah bro", "good q ${displayName}")
-- Talk like you're texting friends — lowercase, casual
-- NO formal language. Never say "assessment", "indicates", "concerning", "analysis"
-- Be real and helpful about whatever they asked
-- If they ask about a token, give your honest take`;
+- MAX 40 words
+- Actually answer their question with real info/opinion
+- Mention ${displayName} by name once at the start
+- Stay casual but informative — you're a knowledgeable trader, not a hype bot
+- If they ask about a specific token, reference actual data (mcap, liquidity, holders)
+- If they ask something unrelated to crypto, still answer helpfully
+- NO empty hype like "lfg" or "apin'" unless genuinely relevant
+- NO formal language like "assessment", "indicates", "concerning"`;
 
     const aiResponse = await openai.chat.completions.create({
       model: 'grok-3-mini-latest',
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Reply to ${displayName} who said: "${message}"` },
+        { role: 'user', content: `${displayName} says: "${message}"` },
       ],
-      max_tokens: 80,
-      temperature: 1.0,
+      max_tokens: 100,
+      temperature: 0.9,
     });
 
     let response = aiResponse.choices[0]?.message?.content?.trim() || '';
