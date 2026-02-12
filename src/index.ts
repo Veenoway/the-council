@@ -396,6 +396,7 @@ app.get('/api/positions', async (c) => {
 // TELEGRAM CHAT — Users talk to bots via Telegram
 // ============================================================
 
+
 app.post('/api/telegram/chat', async (c) => {
   try {
     const body = await c.req.json();
@@ -403,13 +404,13 @@ app.post('/api/telegram/chat', async (c) => {
 
     if (!message) return c.json({ error: 'Message required' }, 400);
 
-    const { generateDiscussionResponse, generateBotResponse } = await import('./services/grok.js');
     const { postMessage, getCurrentToken, getRecentMessages } = await import('./services/messageBus.js');
     const { getBotConfig } = await import('./bots/personalities.js');
+    const OpenAI = (await import('openai')).default;
 
     const displayName = username || 'anon';
 
-    // 1) Broadcast user message (frontend + TG relay both see it)
+    // 1) Broadcast user message so frontend sees it
     await postMessage(`tg_${displayName}` as any, message);
 
     // 2) Pick which bot responds
@@ -432,48 +433,74 @@ app.post('/api/telegram/chat', async (c) => {
     const config = getBotConfig(respondingBotId as any);
     if (!config) return c.json({ error: 'Bot not found' }, 404);
 
-    // 3) Build context from recent messages
+    // 3) Build context
     const token = getCurrentToken();
-    const recentMessages = getRecentMessages(10);
-    const discussionHistory = recentMessages.map((m: any) => ({
-      botId: m.botId,
-      content: m.content,
-    }));
+    const recentMessages = getRecentMessages(8);
 
-    // 4) Generate bot response
-    let response: string;
-
-    if (token) {
-      response = await generateDiscussionResponse(
-        respondingBotId as any,
-        token,
-        discussionHistory,
-        0
-      );
-    } else {
-      response = await generateBotResponse(respondingBotId as any, {
-         currentToken: token,
-          recentMessages: discussionHistory as any,
-          positions: [],
-          event: {
-            type: 'new_message',
-            data: {
-              message: message,
-              username: displayName,
-              targetBotId: respondingBotId,
-            },
-          },
-      });
+    let chatLog = '';
+    for (const m of recentMessages.slice(-6)) {
+      const name = getBotConfig(m.botId as any)?.name || m.botId;
+      chatLog += `${name}: ${m.content}\n`;
     }
+    chatLog += `${displayName}: ${message}\n`;
 
-    if (!response || response === '...' || response.trim() === '') {
-      response = "hmm lmk what u wanna know";
+    // 4) Generate response with custom prompt that includes user's name
+    const openai = new OpenAI({
+      apiKey: process.env.GROK_API_KEY || process.env.XAI_API_KEY,
+      baseURL: 'https://api.x.ai/v1',
+    });
+
+    const tokenContext = token
+      ? `Current token: $${token.symbol} | ${(token.mcap / 1000).toFixed(1)}K mcap | ${token.holders} holders`
+      : 'No token being analyzed right now.';
+
+    const systemPrompt = `You are ${config.name} in a degen crypto group chat on Telegram.
+
+Your vibe: ${config.personality}
+
+${tokenContext}
+
+Recent chat:
+${chatLog}
+
+A Telegram user named "${displayName}" just sent a message. Reply to them directly.
+
+RULES:
+- MAX 25 words
+- Address ${displayName} by name naturally (e.g. "yo ${displayName},", "${displayName} nah bro", "good q ${displayName}")
+- Talk like you're texting friends — lowercase, casual
+- NO formal language. Never say "assessment", "indicates", "concerning", "analysis"
+- Be real and helpful about whatever they asked
+- If they ask about a token, give your honest take`;
+
+    const aiResponse = await openai.chat.completions.create({
+      model: 'grok-3-mini-latest',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `Reply to ${displayName} who said: "${message}"` },
+      ],
+      max_tokens: 80,
+      temperature: 1.0,
+    });
+
+    let response = aiResponse.choices[0]?.message?.content?.trim() || '';
+
+    // Clean up any tags that might slip through
+    response = response
+      .replace(/\[BULLISH\]/g, '')
+      .replace(/\[BEARISH\]/g, '')
+      .replace(/\[NEUTRAL\]/g, '')
+      .replace(/\[CONFIDENCE:\s*\d+\]/g, '')
+      .trim();
+
+    if (!response) {
+      response = `yo ${displayName}, lemme think on that one`;
     }
 
     // 5) Broadcast bot response
     await postMessage(respondingBotId as any, response);
 
-    console.log(`💬 TG @${displayName} → ${config.name}: "${response.slice(0, 50)}"`);
+    console.log(`💬 TG @${displayName} → ${config.name}: "${response.slice(0, 60)}"`);
 
     return c.json({
       success: true,
