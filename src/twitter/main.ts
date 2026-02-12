@@ -38,9 +38,10 @@ export async function postTweet(text: string): Promise<string | null> {
   }
 
   try {
-    const { data } = await rwClient.v2.tweet(text);
-    console.log(`🐦 Tweet posted: ${data.id}`);
-    return data.id;
+    // const { data } = await rwClient.v2.tweet(text);
+    // console.log(`🐦 Tweet posted: ${data.id}`);
+    // return data.id;
+    return null;
   } catch (err: any) {
     console.error("🐦 Failed to tweet:", err?.data || err?.message || err);
     return null;

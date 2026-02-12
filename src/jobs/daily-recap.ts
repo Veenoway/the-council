@@ -1,13 +1,50 @@
 // ============================================================
-// DAILY RECAP JOB — Tweets Council performance every day
+// DAILY RECAP JOB — AI-generated tweets in bot personality
 // ============================================================
 
 import { prisma } from "../db/index.js";
-import { getBotConfig, ALL_BOT_IDS } from "../bots/personalities.js";
-import { postThread, postTweet } from "./main.js";
+import { ALL_BOT_IDS } from "../bots/personalities.js";
+import { postTweet } from "../twitter/main.js";
 import { getBotBalance } from "../services/trading.js";
 import { getWalletHoldings } from "../services/nadfun.js";
 import { getBotWallet } from "../services/trading.js";
+import OpenAI from "openai";
+
+const BOT_DISPLAY: Record<
+  string,
+  { name: string; emoji: string; personality: string }
+> = {
+  chad: {
+    name: "James",
+    emoji: "🦍",
+    personality:
+      "CT degen energy, uses slang like 'fr', 'ngl', 'ser'. Gets hyped but keeps it real. Talks like a trader on crypto twitter.",
+  },
+  quantum: {
+    name: "Keone",
+    emoji: "🤓",
+    personality:
+      "Pure data nerd. References numbers, RSI, percentages. Precise and analytical but not boring. Dry humor.",
+  },
+  sensei: {
+    name: "Portdev",
+    emoji: "🎌",
+    personality:
+      "Community-focused, zen vibes, occasional anime references. Believes in diamond hands and organic growth.",
+  },
+  sterling: {
+    name: "Harpal",
+    emoji: "💼",
+    personality:
+      "Risk manager. Cautious, worst-case thinker. Blunt about bad trades. Protective of the treasury.",
+  },
+  oracle: {
+    name: "Mike",
+    emoji: "🔮",
+    personality:
+      "Cryptic and contrarian. Speaks in metaphors. Sees patterns others miss. Mysterious but insightful.",
+  },
+};
 
 interface DailyStats {
   totalTokensAnalyzed: number;
@@ -17,9 +54,9 @@ interface DailyStats {
   totalVolumeMon: number;
   bestBot: { name: string; pnl: number; trades: number } | null;
   worstBot: { name: string; pnl: number; trades: number } | null;
-  biggestWin: { botName: string; symbol: string; pnl: number } | null;
   topTokens: { symbol: string; verdict: string }[];
   botPerformances: {
+    botId: string;
     name: string;
     emoji: string;
     trades: number;
@@ -28,14 +65,14 @@ interface DailyStats {
     balance: number;
     holdingsValue: number;
   }[];
+  totalAUM: number;
 }
 
-async function gatherDailyStats(): Promise<DailyStats> {
+export async function gatherDailyStats(): Promise<DailyStats> {
   const now = new Date();
   const dayStart = new Date(now);
   dayStart.setUTCHours(0, 0, 0, 0);
 
-  // Tokens analyzed today
   const tokensToday = await prisma.token.findMany({
     where: { updatedAt: { gte: dayStart } },
     orderBy: { updatedAt: "desc" },
@@ -44,7 +81,6 @@ async function gatherDailyStats(): Promise<DailyStats> {
   const buys = tokensToday.filter((t: any) => t.verdict === "buy");
   const passes = tokensToday.filter((t: any) => t.verdict === "pass");
 
-  // Positions opened today
   const positionsToday = await prisma.position.findMany({
     where: { createdAt: { gte: dayStart } },
   });
@@ -54,7 +90,6 @@ async function gatherDailyStats(): Promise<DailyStats> {
     0,
   );
 
-  // Get current MON price
   let monPriceUsd = 0.018;
   try {
     const res = await fetch(
@@ -64,13 +99,13 @@ async function gatherDailyStats(): Promise<DailyStats> {
     monPriceUsd = data?.market_info?.native_price || 0.018;
   } catch {}
 
-  // Per-bot performance
+  let totalAUM = 0;
+
   const botPerformances = await Promise.all(
     ALL_BOT_IDS.map(async (botId) => {
-      const config = getBotConfig(botId) as any;
+      const display = BOT_DISPLAY[botId] || { name: botId, emoji: "🤖" };
       const botPositions = positionsToday.filter((p: any) => p.botId === botId);
 
-      // Get token prices for P&L
       const tokenAddresses = [
         ...new Set(botPositions.map((p: any) => p.tokenAddress)),
       ];
@@ -91,12 +126,10 @@ async function gatherDailyStats(): Promise<DailyStats> {
         const currentPrice = priceMap[p.tokenAddress.toLowerCase()] || 0;
         const entryPrice = Number(p.entryPrice) || 0;
         const amount = Number(p.amount) || 0;
-        const entryValueMon = Number(p.entryValueMon) || 0;
 
         const profitUsd = amount * (currentPrice - entryPrice);
         const profitMon = monPriceUsd > 0 ? profitUsd / monPriceUsd : 0;
         totalPnlMon += profitMon;
-
         if (profitMon > 0) wins++;
       }
 
@@ -111,10 +144,12 @@ async function gatherDailyStats(): Promise<DailyStats> {
         }
       } catch {}
 
+      totalAUM += balance + holdingsValue;
+
       return {
         botId,
-        name: config?.name || botId,
-        emoji: config?.emoji || "🤖",
+        name: display.name,
+        emoji: display.emoji,
         trades: botPositions.length,
         pnlMon: Math.round(totalPnlMon * 1000) / 1000,
         winRate:
@@ -127,7 +162,6 @@ async function gatherDailyStats(): Promise<DailyStats> {
     }),
   );
 
-  // Best & worst bot
   const sorted = [...botPerformances].sort((a, b) => b.pnlMon - a.pnlMon);
   const bestBot =
     sorted.length > 0 && sorted[0].trades > 0
@@ -146,11 +180,9 @@ async function gatherDailyStats(): Promise<DailyStats> {
         }
       : null;
 
-  // Top tokens
-  const topTokens = buys.slice(0, 3).map((t: any) => ({
-    symbol: t.symbol,
-    verdict: t.verdict,
-  }));
+  const topTokens = buys
+    .slice(0, 5)
+    .map((t: any) => ({ symbol: t.symbol, verdict: t.verdict }));
 
   return {
     totalTokensAnalyzed: tokensToday.length,
@@ -160,66 +192,134 @@ async function gatherDailyStats(): Promise<DailyStats> {
     totalVolumeMon: Math.round(totalVolumeMon * 1000) / 1000,
     bestBot,
     worstBot,
-    biggestWin: null,
     topTokens,
     botPerformances,
+    totalAUM: Math.round(totalAUM),
   };
 }
 
-function formatDailyTweet(stats: DailyStats): string[] {
+export async function generateBotTweet(stats: DailyStats): Promise<string> {
+  const botIds = Object.keys(BOT_DISPLAY);
+  const randomBotId = botIds[Math.floor(Math.random() * botIds.length)];
+  const bot = BOT_DISPLAY[randomBotId];
+
   const date = new Date().toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
   });
-
-  // Tweet 1: Summary
   const buyRate =
     stats.totalTokensAnalyzed > 0
       ? Math.round((stats.totalBuys / stats.totalTokensAnalyzed) * 100)
       : 0;
 
-  let tweet1 = `🏛️ The Council — Daily Recap (${date})\n\n`;
-  tweet1 += `Tokens scanned: ${stats.totalTokensAnalyzed}\n`;
-  tweet1 += `Bought: ${stats.totalBuys} | Passed: ${stats.totalPasses} (${buyRate}% buy rate)\n`;
-  tweet1 += `Total trades: ${stats.totalTrades}\n`;
-  tweet1 += `Volume: ${stats.totalVolumeMon} MON`;
+  const leaderboard = [...stats.botPerformances]
+    .filter((b) => b.trades > 0)
+    .sort((a, b) => b.pnlMon - a.pnlMon);
 
-  if (stats.topTokens.length > 0) {
-    tweet1 += `\n\nBought today: ${stats.topTokens.map((t) => `$${t.symbol}`).join(", ")}`;
+  const leaderboardStr = leaderboard
+    .map(
+      (b, i) =>
+        `${i + 1}. ${b.emoji} ${b.name}: ${b.trades} trades, ${b.pnlMon >= 0 ? "+" : ""}${b.pnlMon} MON, ${b.winRate}% WR`,
+    )
+    .join("\n");
+
+  const boughtStr =
+    stats.topTokens.length > 0
+      ? stats.topTokens.map((t) => `$${t.symbol}`).join(", ")
+      : "nothing today";
+
+  const ownPerf = stats.botPerformances.find((b) => b.botId === randomBotId);
+  const ownRank = leaderboard.findIndex((b) => b.botId === randomBotId) + 1;
+
+  const openai = new OpenAI({
+    apiKey: process.env.GROK_API_KEY || process.env.XAI_API_KEY,
+    baseURL: "https://api.x.ai/v1",
+  });
+
+  const prompt = `You are ${bot.name}, an AI trading agent from The Apostate — a council of 5 AI bots that debate and trade memecoins on Monad.
+
+Your personality: ${bot.personality}
+
+Write a daily recap tweet for today (${date}).
+
+HERE ARE TODAY'S STATS:
+- Tokens scanned: ${stats.totalTokensAnalyzed}
+- Bought: ${stats.totalBuys} | Passed: ${stats.totalPasses} (${buyRate}% buy rate)
+- Total trades executed: ${stats.totalTrades}
+- Volume: ${stats.totalVolumeMon} MON
+- Tokens bought today: ${boughtStr}
+- Total AUM: ${stats.totalAUM} MON
+
+BOT LEADERBOARD:
+${leaderboardStr}
+
+YOUR OWN PERFORMANCE:
+- You made ${ownPerf?.trades || 0} trades today
+- Your P&L: ${ownPerf?.pnlMon || 0} MON
+- Your win rate: ${ownPerf?.winRate || 0}%
+- You're ranked #${ownRank || "?"} today
+
+RULES:
+- Start with: "Gmonad, ${bot.name} from The Apostate here ${bot.emoji}"
+- MUST be under 270 characters total
+- Use line breaks (\\n) to separate ideas — make it visually clean and readable
+- Write in YOUR voice and personality
+- Include 2-3 real numbers from the stats
+- Mention 1-2 token tickers with $ if we bought any
+- You can roast other bots, hype yourself, or be humble — stay in character
+- NO hashtags
+- One single tweet, not a thread
+- Be entertaining, not corporate
+- Do NOT add a sign-off at the end since you already introduced yourself`;
+
+  const response = await openai.chat.completions.create({
+    model: "grok-3-mini-latest",
+    messages: [
+      { role: "system", content: prompt },
+      { role: "user", content: "Write the daily recap tweet." },
+    ],
+    max_tokens: 150,
+    temperature: 1,
+  });
+
+  let tweet = response.choices[0]?.message?.content?.trim() || "";
+  tweet = tweet.replace(/^["']|["']$/g, "").trim();
+
+  if (tweet.length > 280) tweet = tweet.slice(0, 277) + "...";
+
+  console.log(`🐦 Generated tweet as ${bot.name} (${tweet.length} chars)`);
+  return tweet;
+}
+
+export function formatFallbackTweet(stats: DailyStats): string {
+  const date = new Date().toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+  const buyRate =
+    stats.totalTokensAnalyzed > 0
+      ? Math.round((stats.totalBuys / stats.totalTokensAnalyzed) * 100)
+      : 0;
+
+  const leaderboard = [...stats.botPerformances]
+    .filter((b) => b.trades > 0)
+    .sort((a, b) => b.pnlMon - a.pnlMon);
+
+  let tweet = `🏛️ The Council — ${date}\n\n`;
+  tweet += `Scanned ${stats.totalTokensAnalyzed} tokens, bought ${stats.totalBuys} (${buyRate}%)\n`;
+  tweet += `${stats.totalTrades} trades | ${stats.totalVolumeMon} MON volume\n\n`;
+
+  if (leaderboard.length > 0) {
+    tweet += `👑 ${leaderboard[0].emoji} ${leaderboard[0].name} led with +${leaderboard[0].pnlMon} MON\n`;
   }
+  tweet += `\nTotal AUM: ${stats.totalAUM} MON`;
 
-  // Tweet 2: Bot leaderboard
-  let tweet2 = `📊 Bot Performance\n\n`;
-  const activeBots = stats.botPerformances.filter((b) => b.trades > 0);
+  if (tweet.length > 280) tweet = tweet.slice(0, 277) + "...";
+  return tweet;
+}
 
-  if (activeBots.length > 0) {
-    const leaderboard = [...activeBots].sort((a, b) => b.pnlMon - a.pnlMon);
-    for (const bot of leaderboard) {
-      const pnlSign = bot.pnlMon >= 0 ? "+" : "";
-      tweet2 += `${bot.emoji} ${bot.name}: ${bot.trades} trades | ${pnlSign}${bot.pnlMon} MON | ${bot.winRate}% WR\n`;
-    }
-  } else {
-    tweet2 += `No trades today. The Council is watching.`;
-  }
-
-  // Tweet 3: Portfolio snapshot
-  let tweet3 = `💰 Portfolio Snapshot\n\n`;
-  let totalValue = 0;
-
-  for (const bot of stats.botPerformances) {
-    const total = bot.balance + bot.holdingsValue;
-    totalValue += total;
-    tweet3 += `${bot.emoji} ${bot.name}: ${total.toFixed(1)} MON (${bot.balance.toFixed(1)} liquid + ${bot.holdingsValue.toFixed(1)} holdings)\n`;
-  }
-
-  tweet3 += `\nTotal AUM: ${totalValue.toFixed(1)} MON`;
-
-  // Trim tweets to 280 chars
-  const tweets = [tweet1, tweet2, tweet3].map((t) =>
-    t.length > 280 ? t.slice(0, 277) + "..." : t,
-  );
-
-  return tweets;
+export function formatDailyTweet(stats: DailyStats): string[] {
+  return [formatFallbackTweet(stats)];
 }
 
 // ============================================================
@@ -241,12 +341,17 @@ async function runDailyRecap(): Promise<void> {
 
   try {
     const stats = await gatherDailyStats();
-    const tweets = formatDailyTweet(stats);
 
-    console.log("🐦 Daily recap tweets:");
-    tweets.forEach((t, i) => console.log(`  [${i + 1}] ${t.slice(0, 100)}...`));
+    let tweet: string;
+    try {
+      tweet = await generateBotTweet(stats);
+    } catch (err) {
+      console.error("🐦 AI generation failed, using fallback:", err);
+      tweet = formatFallbackTweet(stats);
+    }
 
-    await postThread(tweets);
+    console.log(`🐦 Tweet: ${tweet}`);
+    await postTweet(tweet);
     console.log("🐦 Daily recap posted!");
   } catch (err) {
     console.error("🐦 Daily recap failed:", err);
@@ -254,7 +359,6 @@ async function runDailyRecap(): Promise<void> {
 }
 
 export function startDailyRecap(): void {
-  // Schedule first run at midnight UTC
   const msToMidnight = msUntilMidnightUTC();
   const hoursToMidnight = Math.round((msToMidnight / 1000 / 60 / 60) * 10) / 10;
 
@@ -262,8 +366,6 @@ export function startDailyRecap(): void {
 
   dailyTimer = setTimeout(() => {
     runDailyRecap();
-
-    // Then repeat every 24h
     dailyTimer = setInterval(runDailyRecap, 24 * 60 * 60 * 1000);
   }, msToMidnight);
 }
@@ -276,5 +378,4 @@ export function stopDailyRecap(): void {
   }
 }
 
-// Manual trigger for testing
 export { runDailyRecap };
