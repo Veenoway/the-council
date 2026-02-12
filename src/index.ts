@@ -177,6 +177,74 @@ app.get('/api/trades/live', async (c) => {
 // TOKENS
 // ============================================================
 
+// ============================================================
+// TOKEN TRADES — Add this to server.ts
+// ============================================================
+
+app.get('/api/trades/:tokenAddress', async (c) => {
+  try {
+    const tokenAddress = c.req.param('tokenAddress');
+
+    // Get bot positions for this token
+    const positions = await prisma.position.findMany({
+      where: { tokenAddress },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    // Get agent trades for this token
+    const agentTrades = await prisma.agentTrade.findMany({
+      where: { tokenAddress },
+      orderBy: { createdAt: 'asc' },
+      include: { agent: { select: { name: true, avatar: true, color: true } } },
+    });
+
+    const trades = [
+      ...positions.map((p: any) => {
+        const config = getBotConfig(p.botId as any) as any;
+        const isHuman = p.botId.startsWith('human_');
+        return {
+          id: p.id,
+          botId: p.botId,
+          botName: config?.name || (isHuman ? p.botId.slice(6, 12) + '...' : p.botId),
+          botColor: config?.color || (isHuman ? '#06b6d4' : '#888'),
+          botEmoji: config?.emoji || (isHuman ? '👤' : '🤖'),
+          side: 'buy' as const,
+          amount: Number(p.amount),
+          valueMon: Number(p.entryValueMon) || 0,
+          price: Number(p.entryPrice),
+          txHash: p.entryTxHash,
+          timestamp: p.createdAt.getTime() / 1000, // Unix seconds for TradingView
+          createdAt: p.createdAt,
+        };
+      }),
+      ...agentTrades.map((t: any) => ({
+        id: t.id,
+        botId: `agent_${t.agentId}`,
+        botName: t.agent?.name || 'Agent',
+        botColor: t.agent?.color || '#06b6d4',
+        botEmoji: t.agent?.avatar || '🤖',
+        side: t.side as 'buy' | 'sell',
+        amount: t.amountOut,
+        valueMon: t.amountIn,
+        price: t.amountIn > 0 && t.amountOut > 0 ? t.amountIn / t.amountOut : 0,
+        txHash: t.txHash,
+        timestamp: t.createdAt.getTime() / 1000,
+        createdAt: t.createdAt,
+      })),
+    ].sort((a, b) => a.timestamp - b.timestamp);
+
+    return c.json({
+      trades,
+      count: trades.length,
+      tokenAddress,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('Error fetching token trades:', error);
+    return c.json({ error: 'Failed to fetch token trades' }, 500);
+  }
+});
+
 app.get('/api/tokens', async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '50');
