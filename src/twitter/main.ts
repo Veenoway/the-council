@@ -38,6 +38,7 @@ export async function postTweet(text: string): Promise<string | null> {
   }
 
   try {
+    text = text.replace(/\\n/g, "\n");
     const { data } = await rwClient.v2.tweet(text);
     console.log(`🐦 Tweet posted: ${data.id}`);
     return data.id;
