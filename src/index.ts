@@ -209,41 +209,6 @@ app.get("/api/trades/live", async (c) => {
 // TOKENS
 // ============================================================
 
-app.get("/api/twitter/preview", async (c) => {
-  try {
-    const { gatherDailyStats, generateBotTweet, formatFallbackTweet } =
-      await import("./jobs/daily-recap.js");
-    const stats = await gatherDailyStats();
-
-    let aiTweet = "";
-    try {
-      aiTweet = await generateBotTweet(stats);
-    } catch (err) {
-      aiTweet = "(AI generation failed)";
-    }
-
-    const fallbackTweet = formatFallbackTweet(stats);
-
-    return c.json({
-      stats,
-      aiTweet: {
-        text: aiTweet,
-        length: aiTweet.length,
-        withinLimit: aiTweet.length <= 280,
-      },
-      fallbackTweet: {
-        text: fallbackTweet,
-        length: fallbackTweet.length,
-        withinLimit: fallbackTweet.length <= 280,
-      },
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error) {
-    console.error("Error generating preview:", error);
-    return c.json({ error: "Failed to generate preview" }, 500);
-  }
-});
-
 app.get("/api/trades/:tokenAddress", async (c) => {
   try {
     const tokenAddress = c.req.param("tokenAddress");
