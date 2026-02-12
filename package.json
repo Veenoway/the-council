@@ -2,7 +2,7 @@
   "name": "council-backend",
   "version": "1.0.0",
   "type": "module",
- "scripts": {
+  "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "npx prisma generate && tsc",
     "start": "npx prisma db push && node dist/index.js",
@@ -18,6 +18,7 @@
     "groq-sdk": "^0.5.0",
     "hono": "^4.11.8",
     "openai": "^6.18.0",
+    "twitter-api-v2": "^1.29.0",
     "viem": "^2.21.0",
     "ws": "^8.16.0"
   },
