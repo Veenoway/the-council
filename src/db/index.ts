@@ -31,7 +31,7 @@ export async function getRecentMessages(limit: number = 20): Promise<Message[]> 
     take: limit,
   });
 
-  return messages.map((m: any) => ({
+  return messages?.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).map((m: any) => ({
     id: m.id,
     botId: m.botId as BotId | `human_${string}`,
     content: m.content,
