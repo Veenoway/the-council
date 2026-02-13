@@ -592,7 +592,7 @@ app.post("/api/telegram/chat", async (c) => {
       ? `Current token: $${token.symbol} | ${(token.mcap / 1000).toFixed(1)}K mcap | ${token.holders} holders`
       : "No token being analyzed right now.";
 
-const systemPrompt = `You are ${config.name}, an AI crypto trader in The Council group chat on Telegram.
+    const systemPrompt = `You are ${config.name}, an AI crypto trader in The Council group chat on Telegram.
 
 Your personality: ${config.personality}
 
@@ -664,6 +664,230 @@ RULES:
   } catch (error) {
     console.error("Error in telegram chat:", error);
     return c.json({ error: "Failed to generate response" }, 500);
+  }
+});
+
+// ============================================================
+// LEADERBOARD — Humans + Agents ranked by PnL %
+// ============================================================
+
+app.get("/api/leaderboard", async (c) => {
+  try {
+    const from = c.req.query("from"); // ISO date
+    const to = c.req.query("to"); // ISO date
+    const minHoldMon = parseFloat(c.req.query("minHold") || "100");
+
+    // Date filters
+    const dateFilter: any = {};
+    if (from) dateFilter.gte = new Date(from);
+    if (to) dateFilter.lte = new Date(to);
+    const where: any = {};
+    if (from || to) where.createdAt = dateFilter;
+
+    // Fetch MON price
+    const res = await fetch(
+      "https://api.nadapp.net/trade/market/0x350035555E10d9AfAF1566AaebfCeD5BA6C27777",
+    );
+    const dataMon = await res.json();
+    const MON_PRICE_USD = dataMon?.market_info?.native_price || 0.01795;
+
+    // Get all positions (bot positions include human_ and agent_)
+    const positions = await prisma.position.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+    });
+
+    // Get current token prices
+    const tokenAddresses = [
+      ...new Set(positions.map((p: any) => p.tokenAddress)),
+    ];
+    const tokens = await prisma.token.findMany({
+      where: { address: { in: tokenAddresses } },
+      select: { address: true, price: true },
+    });
+    const priceMap: Record<string, number> = {};
+    tokens.forEach((t: any) => {
+      priceMap[t.address.toLowerCase()] = t.price || 0;
+    });
+
+    // Get agent trades too
+    const agentTrades = await prisma.agentTrade.findMany({
+      where: from || to ? { createdAt: dateFilter } : {},
+      include: { agent: { select: { name: true, avatar: true, color: true } } },
+    });
+
+    // Group by trader (botId for positions, agentId for agent trades)
+    const traders = new Map<
+      string,
+      {
+        id: string;
+        name: string;
+        avatar: string;
+        color: string;
+        type: "human" | "agent" | "bot";
+        totalInvested: number;
+        totalCurrentValue: number;
+        trades: number;
+        wins: number;
+        losses: number;
+        positions: Array<{
+          symbol: string;
+          pnlPercent: number;
+          valueMon: number;
+        }>;
+      }
+    >();
+
+    // Process bot/human positions
+    for (const p of positions) {
+      const botId = p.botId;
+
+      // Skip core bots — only humans and agents
+      if (!botId.startsWith("human_") && !botId.startsWith("agent_")) continue;
+
+      const entryValueMON = Number(p.entryValueMon) || 0;
+      if (entryValueMON < minHoldMon) continue;
+
+      const currentPrice = priceMap[p.tokenAddress.toLowerCase()] || 0;
+      const entryPrice = Number(p.entryPrice) || 0;
+      const amount = Number(p.amount) || 0;
+      const profitUSD = amount * (currentPrice - entryPrice);
+      const profitMON = profitUSD / MON_PRICE_USD;
+      const currentValueMON = entryValueMON + profitMON;
+
+      if (!traders.has(botId)) {
+        const isHuman = botId.startsWith("human_");
+        const addr = isHuman ? botId.replace("human_", "") : "";
+        let name = addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : botId;
+        let avatar = "👤";
+        let color = "#06b6d4";
+
+        if (botId.startsWith("agent_")) {
+          const agentId = botId.replace("agent_", "");
+          const agent = await prisma.agent.findUnique({
+            where: { id: agentId },
+          });
+          if (agent) {
+            name = agent.name;
+            avatar = agent.avatar || "🤖";
+            color = agent.color || "#06b6d4";
+          }
+        }
+
+        traders.set(botId, {
+          id: botId,
+          name,
+          avatar,
+          color,
+          type: isHuman ? "human" : "agent",
+          totalInvested: 0,
+          totalCurrentValue: 0,
+          trades: 0,
+          wins: 0,
+          losses: 0,
+          positions: [],
+        });
+      }
+
+      const trader = traders.get(botId)!;
+      trader.totalInvested += entryValueMON;
+      trader.totalCurrentValue += currentValueMON;
+      trader.trades++;
+      if (profitMON > 0) trader.wins++;
+      else trader.losses++;
+      trader.positions.push({
+        symbol: p.tokenSymbol,
+        pnlPercent: entryValueMON > 0 ? (profitMON / entryValueMON) * 100 : 0,
+        valueMon: Math.round(entryValueMON * 1000) / 1000,
+      });
+    }
+
+    // Process agent trades (from executeAgentTradeWithPK)
+    for (const t of agentTrades) {
+      const traderId = `agent_${t.agentId}`;
+      const entryValueMON = t.amountIn;
+      if (entryValueMON < minHoldMon) continue;
+
+      const currentPrice = priceMap[t.tokenAddress.toLowerCase()] || 0;
+      const amountOut = t.amountOut;
+      const currentValueMON = (amountOut * currentPrice) / MON_PRICE_USD;
+
+      if (!traders.has(traderId)) {
+        traders.set(traderId, {
+          id: traderId,
+          name: t.agent?.name || "Agent",
+          avatar: t.agent?.avatar || "🤖",
+          color: t.agent?.color || "#06b6d4",
+          type: "agent",
+          totalInvested: 0,
+          totalCurrentValue: 0,
+          trades: 0,
+          wins: 0,
+          losses: 0,
+          positions: [],
+        });
+      }
+
+      const trader = traders.get(traderId)!;
+      trader.totalInvested += entryValueMON;
+      trader.totalCurrentValue += currentValueMON;
+      trader.trades++;
+      const pnl = currentValueMON - entryValueMON;
+      if (pnl > 0) trader.wins++;
+      else trader.losses++;
+      trader.positions.push({
+        symbol: t.tokenSymbol,
+        pnlPercent: entryValueMON > 0 ? (pnl / entryValueMON) * 100 : 0,
+        valueMon: Math.round(entryValueMON * 1000) / 1000,
+      });
+    }
+
+    // Build leaderboard sorted by PnL %
+    const leaderboard = Array.from(traders.values())
+      .map((t) => {
+        const pnlMon = t.totalCurrentValue - t.totalInvested;
+        const pnlPercent =
+          t.totalInvested > 0 ? (pnlMon / t.totalInvested) * 100 : 0;
+        return {
+          rank: 0,
+          id: t.id,
+          name: t.name,
+          avatar: t.avatar,
+          color: t.color,
+          type: t.type,
+          trades: t.trades,
+          wins: t.wins,
+          losses: t.losses,
+          winRate: t.trades > 0 ? Math.round((t.wins / t.trades) * 100) : 0,
+          totalInvested: Math.round(t.totalInvested * 1000) / 1000,
+          totalCurrentValue: Math.round(t.totalCurrentValue * 1000) / 1000,
+          pnlMon: Math.round(pnlMon * 1000) / 1000,
+          pnlPercent: Math.round(pnlPercent * 10) / 10,
+          topPositions: t.positions
+            .sort((a, b) => b.pnlPercent - a.pnlPercent)
+            .slice(0, 3),
+        };
+      })
+      .sort((a, b) => b.pnlPercent - a.pnlPercent);
+
+    // Assign ranks
+    leaderboard.forEach((entry, i) => {
+      entry.rank = i + 1;
+    });
+
+    return c.json({
+      leaderboard,
+      count: leaderboard.length,
+      filters: {
+        from: from || null,
+        to: to || null,
+        minHoldMon,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Error fetching leaderboard:", error);
+    return c.json({ error: "Failed to fetch leaderboard" }, 500);
   }
 });
 
