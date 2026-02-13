@@ -261,6 +261,10 @@ export async function startOrchestrator(): Promise<void> {
 
 async function refillTokenQueue(): Promise<void> {
   try {
+    if (tokenQueue.length === 0 && seenTokens.size > 0) {
+      console.log(`🧹 Clearing ${seenTokens.size} seen tokens`);
+      seenTokens.clear();
+    }
     console.log(`📡 Fetching new tokens...`);
     const tokens = await getNewTokens(30);
     let added = 0;
