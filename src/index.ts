@@ -1228,6 +1228,11 @@ app.post("/api/trade/notify", async (c) => {
     const botId = `human_${userAddress}`;
     const displayName = `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}`;
 
+    const tokenData = await prisma.token.findUnique({
+      where: { address: tokenAddress },
+      select: { price: true },
+    });
+
     const { handleUserTrade } = await import("./services/orchestrator.js");
 
     await handleUserTrade({
@@ -1247,7 +1252,7 @@ app.post("/api/trade/notify", async (c) => {
       side: "buy",
       amountIn: parseFloat(amountMon) || 0,
       amountOut: parseFloat(amountTokens) || 0,
-      price: 0,
+      price: tokenData?.price || 0,
       txHash: txHash || "",
       status: "confirmed",
       createdAt: new Date(),
@@ -1258,7 +1263,7 @@ app.post("/api/trade/notify", async (c) => {
       tokenAddress,
       tokenSymbol,
       amount: parseFloat(amountTokens) || 0,
-      entryPrice: 0,
+      entryPrice: tokenData?.price || 0,
       entryTxHash: txHash || "",
       entryValueMon: parseFloat(amountMon) || 0,
     });
