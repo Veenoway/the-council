@@ -673,11 +673,10 @@ RULES:
 
 app.get("/api/leaderboard", async (c) => {
   try {
-    const from = c.req.query("from"); // ISO date
-    const to = c.req.query("to"); // ISO date
-    const minHoldMon = parseFloat(c.req.query("minHold") || "100");
+    const from = c.req.query("from");
+    const to = c.req.query("to");
+    const minHoldMon = parseFloat(c.req.query("minHold") || "0");
 
-    // Date filters
     const dateFilter: any = {};
     if (from) dateFilter.gte = new Date(from);
     if (to) dateFilter.lte = new Date(to);
@@ -691,7 +690,7 @@ app.get("/api/leaderboard", async (c) => {
     const dataMon = await res.json();
     const MON_PRICE_USD = dataMon?.market_info?.native_price || 0.01795;
 
-    // Get all positions (bot positions include human_ and agent_)
+    // Get all positions
     const positions = await prisma.position.findMany({
       where,
       orderBy: { createdAt: "desc" },
@@ -710,13 +709,24 @@ app.get("/api/leaderboard", async (c) => {
       priceMap[t.address.toLowerCase()] = t.price || 0;
     });
 
-    // Get agent trades too
+    // Get agent trades
     const agentTrades = await prisma.agentTrade.findMany({
       where: from || to ? { createdAt: dateFilter } : {},
       include: { agent: { select: { name: true, avatar: true, color: true } } },
     });
 
-    // Group by trader (botId for positions, agentId for agent trades)
+    // Add agent trade token addresses to priceMap
+    const agentTokenAddresses = [
+      ...new Set(agentTrades.map((t: any) => t.tokenAddress)),
+    ];
+    const agentTokens = await prisma.token.findMany({
+      where: { address: { in: agentTokenAddresses } },
+      select: { address: true, price: true },
+    });
+    agentTokens.forEach((t: any) => {
+      priceMap[t.address.toLowerCase()] = t.price || 0;
+    });
+
     const traders = new Map<
       string,
       {
@@ -738,13 +748,9 @@ app.get("/api/leaderboard", async (c) => {
       }
     >();
 
-    // Process bot/human positions
+    // Process ALL positions (core bots + humans + agents)
     for (const p of positions) {
       const botId = p.botId;
-
-      // Skip core bots — only humans and agents
-      if (!botId.startsWith("human_") && !botId.startsWith("agent_")) continue;
-
       const entryValueMON = Number(p.entryValueMon) || 0;
       if (entryValueMON < minHoldMon) continue;
 
@@ -757,12 +763,20 @@ app.get("/api/leaderboard", async (c) => {
 
       if (!traders.has(botId)) {
         const isHuman = botId.startsWith("human_");
-        const addr = isHuman ? botId.replace("human_", "") : "";
-        let name = addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : botId;
-        let avatar = "👤";
-        let color = "#06b6d4";
+        const isAgent = botId.startsWith("agent_");
 
-        if (botId.startsWith("agent_")) {
+        let name = botId;
+        let avatar = "🤖";
+        let color = "#888";
+        let type: "human" | "agent" | "bot" = "bot";
+
+        if (isHuman) {
+          const addr = botId.replace("human_", "");
+          name = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+          avatar = "👤";
+          color = "#06b6d4";
+          type = "human";
+        } else if (isAgent) {
           const agentId = botId.replace("agent_", "");
           const agent = await prisma.agent.findUnique({
             where: { id: agentId },
@@ -772,6 +786,16 @@ app.get("/api/leaderboard", async (c) => {
             avatar = agent.avatar || "🤖";
             color = agent.color || "#06b6d4";
           }
+          type = "agent";
+        } else {
+          // Core bot
+          const config = getBotConfig(botId as any) as any;
+          if (config) {
+            name = config.name;
+            avatar = config.emoji || "🤖";
+            color = config.color || "#888";
+          }
+          type = "bot";
         }
 
         traders.set(botId, {
@@ -779,7 +803,7 @@ app.get("/api/leaderboard", async (c) => {
           name,
           avatar,
           color,
-          type: isHuman ? "human" : "agent",
+          type,
           totalInvested: 0,
           totalCurrentValue: 0,
           trades: 0,
@@ -870,7 +894,6 @@ app.get("/api/leaderboard", async (c) => {
       })
       .sort((a, b) => b.pnlPercent - a.pnlPercent);
 
-    // Assign ranks
     leaderboard.forEach((entry, i) => {
       entry.rank = i + 1;
     });
