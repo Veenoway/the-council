@@ -267,3 +267,57 @@ model AgentTrade {
   @@index([tokenAddress])
   @@index([createdAt])
 }
+
+
+model DaoProposal {
+  id          String   @id @default(uuid())
+  title       String
+  description String
+  type        String   // 'naming' | 'skill' | 'feature' | 'custom'
+  
+  // Options (JSON array of strings)
+  options     Json     // ["Option A", "Option B", "Option C"]
+  
+  // State
+  status      String   @default("active") // 'active' | 'closed' | 'cancelled'
+  
+  // Timing
+  startsAt    DateTime @default(now())
+  endsAt      DateTime
+  
+  // Results
+  winningOption Int?
+  totalVotes    Int      @default(0)
+  totalWeight   Float    @default(0)
+  
+  // Creator
+  createdBy   String   // wallet address or 'admin'
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  votes       DaoVote[]
+  
+  @@index([status])
+  @@index([endsAt])
+}
+
+// ============================================================
+// DAO VOTES
+// ============================================================
+
+model DaoVote {
+  id          String   @id @default(uuid())
+  proposalId  String
+  proposal    DaoProposal @relation(fields: [proposalId], references: [id])
+  
+  walletAddress String
+  optionIndex   Int      // index in the options array
+  weight        Float    // $COUNCIL balance at time of vote
+  
+  createdAt   DateTime @default(now())
+  
+  @@unique([proposalId, walletAddress]) // one vote per proposal per wallet
+  @@index([proposalId])
+  @@index([walletAddress])
+}
