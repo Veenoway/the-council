@@ -390,6 +390,13 @@ daoRouter.post("/vote", async (c) => {
   }
 });
 
+daoRouter.get("/balance", async (c) => {
+  const wallet = c.req.query("wallet");
+  if (!wallet) return c.json({ balance: 0 });
+  const balance = await getCouncilBalance(wallet);
+  return c.json({ balance });
+});
+
 // ============================================================
 // GET /api/dao/my-votes?wallet=0x... — Get user's votes
 // ============================================================
