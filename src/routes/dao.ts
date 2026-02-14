@@ -350,28 +350,7 @@ daoRouter.post("/vote", async (c) => {
     });
 
     if (existingVote) {
-      // Update vote (change option)
-      await prisma.daoVote.update({
-        where: { id: existingVote.id },
-        data: {
-          optionIndex,
-          weight: balance,
-        },
-      });
-
-      console.log(
-        `🗳️ Vote updated: ${walletAddress.slice(0, 8)}... → "${options[optionIndex]}" (${balance.toFixed(0)} weight)`,
-      );
-
-      return c.json({
-        success: true,
-        message: "Vote updated",
-        vote: {
-          option: options[optionIndex],
-          weight: Math.round(balance * 100) / 100,
-          updated: true,
-        },
-      });
+      return c.json({ error: "You already voted on this proposal" }, 400);
     }
 
     // Create new vote
@@ -409,6 +388,13 @@ daoRouter.post("/vote", async (c) => {
     console.error("Error casting vote:", error);
     return c.json({ error: "Failed to cast vote" }, 500);
   }
+});
+
+daoRouter.get("/balance", async (c) => {
+  const wallet = c.req.query("wallet");
+  if (!wallet) return c.json({ balance: 0 });
+  const balance = await getCouncilBalance(wallet);
+  return c.json({ balance });
 });
 
 // ============================================================
