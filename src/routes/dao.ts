@@ -7,7 +7,7 @@
 import { Hono } from "hono";
 import { prisma } from "../db/index.js";
 import { createPublicClient, http, erc20Abi, formatUnits } from "viem";
-import { monadTestnet } from "viem/chains";
+import { monad } from "viem/chains";
 
 const daoRouter = new Hono();
 
@@ -21,7 +21,7 @@ const ADMIN_WALLETS = (process.env.DAO_ADMIN_WALLETS || "")
 
 // Viem client for balance checks
 const client = createPublicClient({
-  chain: monadTestnet,
+  chain: monad,
   transport: http(process.env.MONAD_RPC_URL || "https://rpc.monad.xyz"),
 });
 
