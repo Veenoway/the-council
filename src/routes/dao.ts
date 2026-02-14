@@ -350,28 +350,7 @@ daoRouter.post("/vote", async (c) => {
     });
 
     if (existingVote) {
-      // Update vote (change option)
-      await prisma.daoVote.update({
-        where: { id: existingVote.id },
-        data: {
-          optionIndex,
-          weight: balance,
-        },
-      });
-
-      console.log(
-        `🗳️ Vote updated: ${walletAddress.slice(0, 8)}... → "${options[optionIndex]}" (${balance.toFixed(0)} weight)`,
-      );
-
-      return c.json({
-        success: true,
-        message: "Vote updated",
-        vote: {
-          option: options[optionIndex],
-          weight: Math.round(balance * 100) / 100,
-          updated: true,
-        },
-      });
+      return c.json({ error: "You already voted on this proposal" }, 400);
     }
 
     // Create new vote
