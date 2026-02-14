@@ -32,6 +32,7 @@ import agentsRouter from "./routes/agents.js";
 import { randomUUID } from "node:crypto";
 import { startDailyRecap } from "./jobs/daily-recap.js";
 import { initTwitter } from "./twitter/main.js";
+import daoRouter from "./routes/dao.js";
 
 // ============================================================
 // CONFIG — Railway uses PORT env var
@@ -401,8 +402,35 @@ app.get("/api/tokens/analysis/:address", async (c) => {
 });
 
 // ============================================================
+// DAO ROUTER
+// ============================================================
+
+app.route("/api/dao", daoRouter);
+
+// ============================================================
 // POSITIONS
 // ============================================================
+
+let cachedMonPrice = { value: 0.01795, updatedAt: 0 };
+
+async function getMonPrice(): Promise<number> {
+  if (Date.now() - cachedMonPrice.updatedAt < 60_000) {
+    return cachedMonPrice.value;
+  }
+  try {
+    const res = await fetch(
+      "https://api.nadapp.net/trade/market/0x350035555E10d9AfAF1566AaebfCeD5BA6C27777",
+    );
+    const data = await res.json();
+    cachedMonPrice = {
+      value: data?.market_info?.native_price || 0.01795,
+      updatedAt: Date.now(),
+    };
+  } catch {
+    // keep old value
+  }
+  return cachedMonPrice.value;
+}
 
 app.get("/api/positions", async (c) => {
   try {
@@ -1203,6 +1231,7 @@ app.get("/api/holder/check/:address", async (c) => {
 // ============================================================
 
 app.route("/api/agents", agentsRouter);
+app.route("/api/dao", daoRouter);
 
 // ============================================================
 // USER TRADE NOTIFICATION
